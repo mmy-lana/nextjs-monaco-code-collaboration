@@ -63,6 +63,8 @@ export async function launchBrowser({ headless = true } = {}) {
   const browser = await puppeteer.launch({
     executablePath,
     headless,
+    // Monaco instantiation + CRDT sync can take a while under emulation.
+    protocolTimeout: 180_000,
     userDataDir: profileDir,
     args: [
       '--no-first-run',
@@ -203,6 +205,22 @@ export function reportBrowserViolations(violations) {
     console.log(`        [request:${violation.label}] ${violation.url} (${violation.error})`);
   }
   return total;
+}
+
+/**
+ * Clicks the centre of an element with a real mouse event.
+ *
+ * `page.click` additionally waits for the element's box to settle, which can
+ * block indefinitely on pages that keep re-rendering (a live CRDT session does
+ * exactly that). Locating the box first and issuing the raw mouse event keeps
+ * the input realistic without the stability heuristic.
+ */
+export async function clickElement(page, selector) {
+  const box = await page.$eval(selector, (element) => {
+    const rect = element.getBoundingClientRect();
+    return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+  });
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
 }
 
 export async function captureScreenshot(page, name) {
