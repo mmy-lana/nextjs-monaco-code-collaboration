@@ -21,10 +21,11 @@ export default {
 
     try {
       await runSuite({ page, url, suite });
-    } finally {
-      // Always print, even when an assertion helper throws mid-suite.
-      return suite.print();
+    } catch (error) {
+      // A thrown step is a failure, never a silently truncated report.
+      suite.fail('suite ran to completion', error?.stack ?? String(error));
     }
+    return suite.print();
   },
 };
 
