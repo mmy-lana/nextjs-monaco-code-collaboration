@@ -3,7 +3,13 @@ import './globals.css';
 
 export const metadata: Metadata = {
   title: 'Real-Time Code Collaboration Editor',
-  description: 'VS Code web layout code collaboration editor powered by Next.js and Monaco',
+  description:
+    'Offline-first peer-to-peer code collaboration editor with a VS Code Web layout, powered by Next.js, Monaco, Yjs CRDTs and WebRTC.',
+  applicationName: 'LAN Code Collaboration',
+  icons: {
+    icon: [{ url: '/icon.svg', type: 'image/svg+xml' }],
+    apple: [{ url: '/icon.svg', type: 'image/svg+xml' }],
+  },
 };
 
 export const viewport: Viewport = {
@@ -12,6 +18,7 @@ export const viewport: Viewport = {
   maximumScale: 1,
   userScalable: false,
   viewportFit: 'cover',
+  themeColor: '#1e1e1e',
 };
 
 export default function RootLayout({
@@ -21,9 +28,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className="vscode-chrome bg-[#1e1e1e] text-[#cccccc] antialiased overflow-hidden">
-        {children}
-      </body>
+      <body className="vscode-chrome antialiased">{children}</body>
     </html>
   );
 }

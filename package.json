@@ -6,7 +6,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit",
+    "verify": "node scripts/verify.mjs",
+    "verify:all": "node scripts/verify.mjs --phases=1,2,3,4,5"
   },
   "dependencies": {
     "@monaco-editor/react": "latest",
@@ -28,8 +31,10 @@
     "@types/node": "latest",
     "@types/react": "latest",
     "@types/react-dom": "latest",
+    "esbuild": "latest",
     "npm-check-updates": "latest",
     "postcss": "latest",
+    "puppeteer-core": "latest",
     "tailwindcss": "latest",
     "typescript": "latest"
   }

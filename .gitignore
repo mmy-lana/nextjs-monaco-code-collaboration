@@ -6,6 +6,7 @@
 
 # testing
 /coverage
+/.verify
 
 # next.js
 /.next/
@@ -17,6 +18,7 @@
 # misc
 .DS_Store
 *.pem
+/.npmrc
 
 # debug
 npm-debug.log*
@@ -36,3 +38,5 @@ pnpm-debug.log*
 next-env.d.ts
 
 repomix-output.xml
+# pnpm local store artefacts (machine-specific)
+/.pnpm-store

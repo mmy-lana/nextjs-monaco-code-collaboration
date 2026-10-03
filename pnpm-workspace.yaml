@@ -1,0 +1,10 @@
+# pnpm 11 keeps its own settings here (not in .npmrc).
+# - allowBuilds: esbuild ships a platform binary and needs its install script.
+# - storeDir: matches where this machine already linked node_modules from.
+# - verifyDepsBeforeRun: disabled because every spec here is a `latest`
+#   dist-tag, which pnpm cannot consider "already satisfied" without
+#   re-resolving and purging node_modules on every `pnpm run`.
+allowBuilds:
+  esbuild: true
+storeDir: /Users/hikari/Library/pnpm/store/v11
+verifyDepsBeforeRun: false
