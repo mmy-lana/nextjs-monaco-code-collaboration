@@ -1,0 +1,133 @@
+@import "tailwindcss";
+
+:root {
+  /* VS Code Core Dark Tokens */
+  --vscode-bg: #1e1e1e;
+  --vscode-sidebar-bg: #252526;
+  --vscode-activitybar-bg: #333333;
+  --vscode-statusbar-bg: #007acc;
+  --vscode-statusbar-offline-bg: #6c757d;
+  --vscode-panel-bg: #1e1e1e;
+  --vscode-editor-bg: #1e1e1e;
+  --vscode-tabs-bg: #2d2d2d;
+  --vscode-tab-active-bg: #1e1e1e;
+  --vscode-tab-inactive-bg: #2d2d2d;
+  --vscode-border: #3c3c3c;
+  --vscode-foreground: #cccccc;
+  --vscode-active-fg: #ffffff;
+  --vscode-accent: #007acc;
+  --vscode-input-bg: #3c3c3c;
+  --vscode-list-hover: #2a2d2e;
+  --vscode-list-active: #094771;
+
+  /* Viewport Height dynamic tokens */
+  --vh: 1vh;
+  --keyboard-height: 0px;
+  --keyboard-bar-height: 0px;
+  --statusbar-height: 24px;
+}
+
+body {
+  background-color: var(--vscode-bg);
+  color: var(--vscode-foreground);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  overflow: hidden;
+  height: 100vh;
+  height: calc(var(--vh, 1vh) * 100);
+  margin: 0;
+  padding: 0;
+}
+
+/* Custom Scrollbars matching VS Code */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(121, 121, 121, 0.4);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 100, 100, 0.7);
+}
+
+/* Restrict unselectable text strictly to outer IDE chrome */
+.vscode-chrome {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Ensure code selection in Monaco remains functional on touch and desktop */
+.monaco-editor-container {
+  height: calc(var(--vh, 1vh) * 100 - var(--statusbar-height) - var(--keyboard-bar-height));
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}
+
+/* Touch-action safeguard for iOS Safari splitter draggers */
+.touch-splitter {
+  touch-action: none !important;
+}
+
+/* Mobile Activity Bar safe-area containment */
+.activity-bar-mobile {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* Mobile Quick Access Bar */
+.mobile-keyboard-bar {
+  height: 40px;
+  background-color: #252526;
+  border-top: 1px solid var(--vscode-border);
+  display: flex;
+  align-items: center;
+  overflow-x: auto;
+  white-space: nowrap;
+  -webkit-overflow-scrolling: touch;
+}
+
+.mobile-keyboard-bar button {
+  min-width: 36px;
+  height: 32px;
+  margin: 0 2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: monospace;
+  font-size: 14px;
+  border-radius: 4px;
+  background: #333333;
+  color: #ffffff;
+}
+
+.mobile-keyboard-bar button:active {
+  background: #007acc;
+}
+
+/* Remote Cursor Styling */
+.yRemoteSelection {
+  background-color: rgba(250, 180, 0, 0.25);
+  position: absolute;
+}
+
+.yRemoteSelectionHead {
+  position: absolute;
+  border-left: 2px solid orange;
+  border-top: 2px solid orange;
+  height: 100%;
+  box-sizing: border-box;
+}
+
+.yRemoteSelectionHead::after {
+  content: ' ';
+  border: 3px solid orange;
+  border-radius: 4px;
+  left: -4px;
+  top: -5px;
+  position: absolute;
+}

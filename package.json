@@ -1,0 +1,36 @@
+{
+  "name": "nextjs-monaco-code-collaboration",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@monaco-editor/react": "latest",
+    "clsx": "latest",
+    "dexie": "latest",
+    "dexie-react-hooks": "latest",
+    "lucide-react": "latest",
+    "monaco-editor": "latest",
+    "next": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "tailwind-merge": "latest",
+    "y-indexeddb": "latest",
+    "y-webrtc": "latest",
+    "yjs": "latest"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "latest",
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "npm-check-updates": "latest",
+    "postcss": "latest",
+    "tailwindcss": "latest",
+    "typescript": "latest"
+  }
+}
