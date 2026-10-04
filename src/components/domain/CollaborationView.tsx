@@ -155,15 +155,25 @@ export function CollaborationView({
           data-state={connection.connectionState}
           data-transport={transportMode}
           className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-            localMesh ? CONNECTION_TONE.connecting : CONNECTION_TONE[connection.connectionState]
+            connection.connectionState === 'connected'
+              ? CONNECTION_TONE.connected
+              : transportMode === 'unavailable'
+                ? CONNECTION_TONE[connection.connectionState]
+                : CONNECTION_TONE.connecting
           }`}
         >
           {/*
-           * "Disconnected" next to a working local mesh reads as a failure and
-           * contradicts the transport panel directly beneath it, so the chip
-           * names the transport whenever one is carrying the document.
+           * Precedence: real peers first, then the transport that is carrying
+           * the document, then the raw connection state. "Disconnected" beside
+           * a working mesh — or beside the local BroadcastChannel path —
+           * contradicts the transport panel directly beneath it, and only a
+           * browser with no usable transport has nothing better to say.
            */}
-          {localMesh ? TRANSPORT_MODE_LABELS['local-mesh'] : CONNECTION_STATE_LABELS[connection.connectionState]}
+          {connection.connectionState === 'connected'
+            ? CONNECTION_STATE_LABELS.connected
+            : transportMode === 'unavailable'
+              ? CONNECTION_STATE_LABELS[connection.connectionState]
+              : TRANSPORT_MODE_LABELS[transportMode]}
         </span>
       </header>
 

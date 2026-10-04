@@ -810,6 +810,10 @@ async function runSuite({ page, browser, url, suite }) {
       const lines = document.querySelector('.monaco-editor .view-lines');
       return {
         tabs: document.querySelectorAll('[data-testid^="editor-tab-"][role="tab"]').length,
+        activeFileId:
+          document.querySelector('[data-testid^="editor-tab-"][aria-selected="true"]')?.getAttribute(
+            'data-testid',
+          ) ?? null,
         paths: nodes.filter((node) => node.deletedAt === null).map((node) => node.path),
         breadcrumb: document.querySelector('[data-testid="breadcrumb-bar"]')?.textContent ?? '',
         editorText: (lines?.textContent ?? '').replace(/\s+/g, ' ').trim(),
@@ -828,6 +832,11 @@ async function runSuite({ page, browser, url, suite }) {
       'the alternate origin selects the starter file',
       alternateBoot.breadcrumb.includes('welcome.ts'),
       alternateBoot.breadcrumb,
+    );
+    suite.equal(
+      'the alternate origin opens the starter file, not merely the first one',
+      alternateBoot.activeFileId,
+      'editor-tab-file-welcome',
     );
     suite.ok(
       'the alternate origin renders real starter content, not an empty buffer',

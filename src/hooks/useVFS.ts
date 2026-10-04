@@ -358,6 +358,83 @@ export async function reconcileWorkspaceTabs(
   return { workspace: updated, changed: true };
 }
 
+/** Every live (non-tombstoned) node in a workspace, straight from Dexie. */
+async function readLiveNodes(workspaceId: string): Promise<VFSNode[]> {
+  const stored = await getDB().nodes.where('workspaceId').equals(workspaceId).toArray();
+  return stored.filter((node) => node.deletedAt === null);
+}
+
+interface BootstrapOutcome {
+  workspace: WorkspaceMetadata;
+  nodes: VFSNode[];
+}
+
+/**
+ * Ensures the workspace row and the starter tree exist, and reconciles the tabs.
+ *
+ * The starter tree is a function of the *tree*, not of whether this particular
+ * call created the workspace row. Gating it on the creation flag stranded the
+ * workspace permanently whenever the two were separated by a reload: a fresh
+ * origin (a second loopback address, a LAN IP) has its own IndexedDB partition,
+ * and an interrupted first load — a closed tab mid-seed, an HMR reload — commits
+ * the workspace row before the nodes. Either way the next load found
+ * `created === false` next to an empty tree and never seeded again, leaving no
+ * nodes, no tab and an editor bound to nothing. Emptiness is the only signal
+ * that needs recovering from.
+ */
+async function bootstrapWorkspace(workspaceId: string): Promise<BootstrapOutcome> {
+  const db = getDB();
+  const { workspace: ensured } = await ensureWorkspace(workspaceId);
+  let live = await readLiveNodes(workspaceId);
+
+  let starterFileId: string | null = null;
+  if (live.length === 0) {
+    starterFileId = await seedStarterFiles(workspaceId);
+    live = await readLiveNodes(workspaceId);
+  }
+
+  /*
+   * Re-read the row: seeding writes it, and so does any other tab sharing this
+   * origin, so the object captured before either no longer reflects disk.
+   */
+  const current = (await db.workspaces.get(workspaceId)) ?? ensured;
+  const reconciled = await reconcileWorkspaceTabs(current, live, {
+    preferFileId: starterFileId,
+    autoOpenFirstFile: true,
+  });
+
+  return { workspace: reconciled.workspace, nodes: live };
+}
+
+/**
+ * Bootstrap promises in flight, keyed by workspace.
+ *
+ * Two bootstraps for one workspace race, and the loser used to win the tab
+ * decision by accident. React's StrictMode double-invokes effects in
+ * development, so this is not a theoretical case: the second pass observed a
+ * tree the first pass had already seeded, concluded that no starter file was
+ * needed, and opened the alphabetically first file instead of the intended
+ * one — leaving development behaving differently from a production build.
+ * Sharing one promise per workspace makes the outcome deterministic and does the
+ * work once. The entry is dropped as soon as it settles, so a later mount always
+ * re-reads current state.
+ */
+const bootstrapInFlight = new Map<string, Promise<BootstrapOutcome>>();
+
+function runWorkspaceBootstrap(workspaceId: string): Promise<BootstrapOutcome> {
+  const existing = bootstrapInFlight.get(workspaceId);
+  if (existing) return existing;
+
+  const pending = bootstrapWorkspace(workspaceId).finally(() => {
+    if (bootstrapInFlight.get(workspaceId) === pending) {
+      bootstrapInFlight.delete(workspaceId);
+    }
+  });
+
+  bootstrapInFlight.set(workspaceId, pending);
+  return pending;
+}
+
 export function useVFS(workspaceId: string): UseVFSResult {
   const [workspace, setWorkspace] = useState<WorkspaceMetadata | null>(null);
   const [nodes, setNodes] = useState<VFSNode[]>([]);
@@ -367,11 +444,7 @@ export function useVFS(workspaceId: string): UseVFSResult {
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const mountedRef = useRef(true);
 
-  const loadNodes = useCallback(async (): Promise<VFSNode[]> => {
-    const db = getDB();
-    const stored = await db.nodes.where('workspaceId').equals(workspaceId).toArray();
-    return stored.filter((node) => node.deletedAt === null);
-  }, [workspaceId]);
+  const loadNodes = useCallback(() => readLiveNodes(workspaceId), [workspaceId]);
 
   const refresh = useCallback(async () => {
     try {
@@ -387,61 +460,34 @@ export function useVFS(workspaceId: string): UseVFSResult {
 
   useEffect(() => {
     mountedRef.current = true;
+    setLoading(true);
 
-    const bootstrap = async () => {
-      setLoading(true);
-      try {
-        const { workspace: ensured } = await ensureWorkspace(workspaceId);
-        let live = await loadNodes();
-
-        /*
-         * The starter tree is a function of the *tree*, not of whether this
-         * particular call created the workspace row. Gating it on the creation
-         * flag stranded the workspace permanently whenever the two were
-         * separated by a reload: a fresh origin (a second loopback address, a
-         * LAN IP) has its own IndexedDB partition, and an interrupted first
-         * load — a closed tab mid-seed, an HMR reload — commits the workspace
-         * row before the nodes. Either way the next load found `created ===
-         * false` next to an empty tree and never seeded again, leaving no nodes,
-         * no tab and an editor bound to nothing. Emptiness is the only signal
-         * that actually needs recovering from.
-         */
-        let starterFileId: string | null = null;
-        if (live.length === 0) {
-          starterFileId = await seedStarterFiles(workspaceId);
-          live = await loadNodes();
-        }
-
-        // Re-read: seeding and the concurrent-bootstrap race both write the
-        // workspace row, so the object captured before them no longer reflects
-        // what is on disk.
-        const current = (await getDB().workspaces.get(workspaceId)) ?? ensured;
-        const reconciled = await reconcileWorkspaceTabs(current, live, {
-          preferFileId: starterFileId,
-          autoOpenFirstFile: true,
-        });
-
+    void runWorkspaceBootstrap(workspaceId)
+      .then(({ workspace: bootstrapped, nodes: live }) => {
         if (!mountedRef.current) return;
-        setWorkspace(reconciled.workspace);
+        setWorkspace(bootstrapped);
         setNodes(sortVFSNodes(live));
         setExpandedIds(
-          new Set(live.filter((node) => isVirtualDirectory(node) && node.parentId === null).map((node) => node.id)),
+          new Set(
+            live
+              .filter((node) => isVirtualDirectory(node) && node.parentId === null)
+              .map((node) => node.id),
+          ),
         );
         setError(null);
-      } catch (bootstrapError) {
+      })
+      .catch((bootstrapError: unknown) => {
         if (!mountedRef.current) return;
         setError(bootstrapError instanceof Error ? bootstrapError.message : String(bootstrapError));
-      } finally {
+      })
+      .finally(() => {
         if (mountedRef.current) setLoading(false);
-      }
-    };
-
-    void bootstrap();
+      });
 
     return () => {
       mountedRef.current = false;
     };
-  }, [loadNodes, workspaceId]);
+  }, [workspaceId]);
 
   const files = useMemo(() => nodes.filter(isVirtualFile), [nodes]);
 

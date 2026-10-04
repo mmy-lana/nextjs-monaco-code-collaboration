@@ -23,7 +23,7 @@ import {
   encodeWorkspaceSnapshot,
   parseWorkspaceSnapshot,
 } from '@/services/workspaceSnapshot';
-import { DEFAULT_SIGNALING } from '@/services/signalingConfig';
+import { DEFAULT_SIGNALING, resolveDefaultSignalingServers } from '@/services/signalingConfig';
 import { isVirtualFile, type VFSNode, type VirtualDirectory } from '@/types/workspace';
 import {
   DEFAULT_MONACO_CONFIG,
@@ -276,6 +276,24 @@ const logOutput = useCallback((line: string) => {
     // Only on identity change: this is a join banner, not a render log.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [collab.identity?.name]);
+
+  useEffect(() => {
+    /*
+     * The default signaling URL is derived from `window.location.hostname`, so a
+     * peer that loaded the app over the LAN aims the rendezvous at this machine
+     * instead of at itself. That derivation needs `window`, so the server render
+     * necessarily used the loopback fallback; re-resolving after hydration gives
+     * the client the right host without shipping two different initial values to
+     * a single render.
+     */
+    setSignalingServersState((current) => {
+      const resolved = resolveDefaultSignalingServers();
+      const unchanged =
+        resolved.length === current.length &&
+        resolved.every((url, index) => url === current[index]);
+      return unchanged ? current : resolved;
+    });
+  }, []);
 
   // ── storage usage ──────────────────────────────────────────────────────────
   useEffect(() => {

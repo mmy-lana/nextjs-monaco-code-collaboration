@@ -46,24 +46,39 @@ second address seeds its own starter tree.
 
 ### Pairing two devices
 
-1. Run the app on both devices.
-2. Open **Collaboration** in the activity bar.
+`pnpm run dev` starts the WebRTC signaling server and the app together, so
+pairing needs no second terminal:
+
+```bash
+pnpm run dev          # signaling on :4444, app on :3000
+```
+
+1. Run that on the machine that hosts the workspace.
+2. Open **Collaboration** in the activity bar on each device.
 3. Set the same **Room ID** on both (the default is `collab-workspace-lan`).
-4. Start a signaling server on one machine and enter its address in **Signaling servers**:
 
-   ```bash
-   pnpm exec y-webrtc-signaling --port 4444
-   # then use ws://<that-machine-ip>:4444 on both devices
-   ```
+The signaling URL defaults to `ws://<the host the page was served from>:4444`,
+so a device that loaded the app from `192.168.1.2:3000` targets `192.168.1.2`
+rather than resolving `localhost` to itself. Set
+`NEXT_PUBLIC_DEFAULT_SIGNALING_SERVER` only when you operate your own rendezvous
+server.
 
-With no signaling server the editor still syncs between tabs of the same browser through
-`BroadcastChannel`, and every keystroke is persisted locally regardless.
+`pnpm run signaling` runs the signaling server on its own, which is what you want
+when the app is already running somewhere else. `Ctrl+C` on `pnpm run dev` stops
+both processes; if something already listens on 4444 the runner says so and
+reuses it instead of failing.
+
+Without a signaling server the editor still syncs between tabs of the same
+browser through `BroadcastChannel` — the status bar calls that state
+**Local Mesh** rather than reporting a disconnection — and every keystroke is
+persisted locally regardless.
 
 ## Scripts
 
 | Command | Purpose |
 |---|---|
-| `pnpm run dev` | Build workers, then start the dev server on all interfaces |
+| `pnpm run dev` | Build workers, then start the signaling server and the dev server |
+| `pnpm run signaling` | Run the WebRTC signaling server alone (default port 4444) |
 | `pnpm run build` | Build workers, then a production build |
 | `pnpm run start` | Serve the production build |
 | `pnpm run typecheck` | `tsc --noEmit` |
@@ -149,8 +164,8 @@ Screenshots from the responsive checks are written to `.verify/`.
 
 ## Environment
 
-Copy `.env.example` to `.env.local` to override the defaults:
-
-```
-NEXT_PUBLIC_DEFAULT_SIGNALING_SERVER=ws://localhost:4444
-```
+Copy `.env.example` to `.env.local` to override the defaults. Leave the signaling
+variable unset unless you run your own rendezvous server: with no value the app
+derives `ws://<page host>:4444`, which is what allows a peer on another device to
+reach the machine hosting the dev server. Pinning `localhost` there makes every
+peer connect to itself.

@@ -3,10 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "node scripts/build-workers.mjs && next dev -H 0.0.0.0",
+    "dev": "node scripts/build-workers.mjs && node scripts/dev.mjs",
     "prebuild": "node scripts/build-workers.mjs",
     "build": "next build",
     "start": "next start",
+    "signaling": "node scripts/signaling.mjs",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "build:workers": "node scripts/build-workers.mjs",
@@ -38,6 +39,7 @@
     "postcss": "latest",
     "puppeteer-core": "latest",
     "tailwindcss": "latest",
-    "typescript": "latest"
+    "typescript": "latest",
+    "ws": "^8.22.0"
   }
 }

@@ -61,18 +61,26 @@ function StatusBarComponent({
 }: StatusBarProps) {
   const connected = connectionState === 'connected';
   const localMesh = transportMode === 'local-mesh';
+  const transportActive = transportMode !== 'unavailable';
 
+  /*
+   * The chip names the transport whenever one is carrying the document. A room
+   * whose signaling is up but which no one has joined yet is not "Disconnected"
+   * — it is a reachable mesh with zero peers, and the peer count is already
+   * reported separately. Only a browser with no usable transport falls back to
+   * the raw connection state.
+   */
   const connectionLabel = connected
     ? `${peerCount} peer${peerCount === 1 ? '' : 's'}`
-    : localMesh
-      ? TRANSPORT_MODE_LABELS['local-mesh']
+    : transportActive
+      ? TRANSPORT_MODE_LABELS[transportMode]
       : CONNECTION_STATE_LABELS[connectionState];
 
   const connectionTooltip = localMesh
     ? `${TRANSPORT_MODE_DETAILS['local-mesh']} ${peerCount} peer(s) in this browser.`
     : connected
       ? `${CONNECTION_STATE_LABELS[connectionState]} · ${peerCount} peer(s) in this room`
-      : `${CONNECTION_STATE_LABELS[connectionState]} · ${TRANSPORT_MODE_DETAILS[transportMode]}`;
+      : `${connectionLabel} · ${TRANSPORT_MODE_DETAILS[transportMode]} · ${peerCount} peer(s) in this room`;
 
   return (
     <footer
