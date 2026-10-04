@@ -160,6 +160,31 @@ export default function WorkspacePage() {
     [vfs.nodes, vfs.workspace?.openFileIds],
   );
 
+  /*
+   * A workspace with no open tab leaves the editor showing "No open editors".
+   * On a narrow viewport the sidebar is collapsed by default, so that message
+   * is all the user sees: a blank canvas with no visible way to reach the
+   * explorer and pick a file. Reveal the navigation once per stranded episode —
+   * the ref makes this fire on the transition rather than re-asserting itself
+   * on every render, so the user stays in control once they have it open.
+   */
+  const strandedRef = useRef(false);
+  useEffect(() => {
+    const stranded =
+      vfs.workspace !== null &&
+      (vfs.workspace.openFileIds.length === 0 || vfs.workspace.activeFileId === null);
+
+    if (!stranded) {
+      strandedRef.current = false;
+      return;
+    }
+    if (strandedRef.current) return;
+
+    strandedRef.current = true;
+    setSidebarOpen(true);
+    setActivityTab('explorer');
+  }, [vfs.workspace]);
+
   const siblings = useMemo(() => {
     if (!activeFile) return [];
     const parentPath = getParentPath(activeFile.path);

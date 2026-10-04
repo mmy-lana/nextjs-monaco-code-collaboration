@@ -847,4 +847,88 @@ async function runSuite({ page, browser, url, suite }) {
   suite.equal('the recovered tab set survives the next bootstrap', secondBoot.active, 'file-welcome');
   suite.equal('the repeated bootstrap reports no load error', secondBoot.error, '');
   suite.ok('the editor is still bound after the repeated bootstrap', secondBootReady);
+
+  // ── stranded tab strip: files present, nothing open ──────────────────────────
+  // The DATA-04 fixture above empties the tree *and* the tab set, so it is
+  // rescued by re-seeding. This one keeps every node and clears only the tabs —
+  // the state produced by closing the last tab, or by a load that committed an
+  // empty tab set over a healthy tree. Without an explicit rescue the hook
+  // reconciles to `openFileIds: []` and binds the editor to nothing.
+  const tabStripState = await page.evaluate(async (workspaceId) => {
+    const db = await new Promise((resolve, reject) => {
+      const request = indexedDB.open('LANCodeCollab-meta');
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+
+    const workspaces = await new Promise((resolve, reject) => {
+      const request = db.transaction('workspaces', 'readonly').objectStore('workspaces').getAll();
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const workspace = workspaces.find((entry) => entry.id === workspaceId);
+
+    await new Promise((resolve, reject) => {
+      const transaction = db.transaction('workspaces', 'readwrite');
+      transaction.objectStore('workspaces').put({
+        ...workspace,
+        activeFileId: null,
+        openFileIds: [],
+        updatedAt: Date.now(),
+      });
+      transaction.oncomplete = () => resolve(undefined);
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+
+    const nodes = await new Promise((resolve, reject) => {
+      const request = db.transaction('nodes', 'readonly').objectStore('nodes').getAll();
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    db.close();
+
+    return {
+      liveFiles: nodes.filter((node) => node.deletedAt === null && node.type === 'file').length,
+      liveNodes: nodes.filter((node) => node.deletedAt === null).length,
+    };
+  }, WORKSPACE_ID);
+
+  suite.atLeast(
+    'the fixture keeps files on disk and clears only the tabs',
+    tabStripState.liveFiles,
+    2,
+  );
+
+  await remountHarness(page);
+  const rescuedReady = await editorIsReady(page);
+  const rescued = await page.evaluate(() => ({
+    openIds: (document.querySelector('[data-testid="vfs-open-ids"]')?.textContent ?? '')
+      .split(',')
+      .filter(Boolean),
+    active: document.querySelector('[data-testid="vfs-active"]')?.textContent ?? '',
+    activePath: document.querySelector('[data-testid="vfs-active-path"]')?.textContent ?? '',
+    error: document.querySelector('[data-testid="vfs-load-error"]')?.textContent ?? '',
+  }));
+
+  suite.ok(
+    'an empty tab strip over a populated tree is rescued on load',
+    rescued.openIds.length >= 1,
+    JSON.stringify(rescued.openIds),
+  );
+  suite.equal(
+    'the rescue opens the first file in tree order',
+    rescued.activePath,
+    '/README.md',
+  );
+  suite.equal('the rescued file becomes the active tab', rescued.active, rescued.openIds[0] ?? '');
+  suite.equal('the tab-strip rescue reports no load error', rescued.error, '');
+  suite.ok('the rescued workspace binds an editor', rescuedReady);
+  suite.ok(
+    'the rescued editor renders the file body, not an empty buffer',
+    rescuedReady &&
+      ((await page.evaluate(() => window.__phase4Editor.getText() ?? '')).includes(
+        'LAN Code Collaboration',
+      )),
+  );
 }

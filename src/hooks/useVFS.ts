@@ -289,26 +289,58 @@ export async function seedStarterFiles(workspaceId: string): Promise<string> {
   return 'file-welcome';
 }
 
+export interface TabReconcileOptions {
+  /**
+   * Preferred file to open when reconciliation empties the tab strip, used to
+   * reopen the starter file right after a re-seed. Ignored when it is not a
+   * live node.
+   */
+  preferFileId?: string | null;
+  /**
+   * Open the first live file when reconciliation empties the tab strip.
+   *
+   * This is what rescues a workspace that has files on disk but nothing open —
+   * every tab closed, or an interrupted load that committed an empty tab set.
+   * Without it the editor binds to nothing and the screen reads as a dead
+   * canvas. It is off during ordinary structural mutations, where the mutation
+   * itself owns which tab should be active; enabling it there would yank the
+   * user into an unrelated file whenever they created a folder.
+   */
+  autoOpenFirstFile?: boolean;
+}
+
+/** First live file in tree order: directories first, then natural name order. */
+function firstLiveFileId(liveNodes: readonly VFSNode[]): string | null {
+  const candidate = sortVFSNodes(liveNodes.filter((node) => node.deletedAt === null)).find(
+    isVirtualFile,
+  );
+  return candidate?.id ?? null;
+}
+
 /**
  * Drops open tabs that point at nodes which no longer exist (deleted locally,
  * or removed by a peer). Called after every structural mutation and on load.
  *
- * When `fallbackFileId` names a live node and the reconciliation leaves the tab
- * strip empty, that file is opened. A workspace with files on disk but nothing
- * open is otherwise stranded: no tab, no active file, an editor bound to
- * nothing. The fallback is ignored unless it is a live file, so deliberately
- * closing every tab in a populated workspace is never undone.
+ * A reconciliation that empties the tab strip can also rescue the workspace: a
+ * file is opened when one was requested and is live, and otherwise when
+ * `autoOpenFirstFile` is set and any live file exists. Without that, a workspace
+ * whose files exist but whose tab set is empty — every tab closed, or an
+ * interrupted load — strands the editor on nothing.
  */
 export async function reconcileWorkspaceTabs(
   workspace: WorkspaceMetadata,
   liveNodes: readonly VFSNode[],
-  fallbackFileId: string | null = null,
+  options: TabReconcileOptions = {},
 ): Promise<{ workspace: WorkspaceMetadata; changed: boolean }> {
   const liveIds = new Set(liveNodes.filter((node) => node.deletedAt === null).map((node) => node.id));
 
   let openFileIds = workspace.openFileIds.filter((id) => liveIds.has(id));
-  if (openFileIds.length === 0 && fallbackFileId !== null && liveIds.has(fallbackFileId)) {
-    openFileIds = [fallbackFileId];
+
+  if (openFileIds.length === 0) {
+    const preferred =
+      options.preferFileId && liveIds.has(options.preferFileId) ? options.preferFileId : null;
+    const rescued = preferred ?? (options.autoOpenFirstFile ? firstLiveFileId(liveNodes) : null);
+    if (rescued) openFileIds = [rescued];
   }
 
   const activeFileId =
@@ -384,7 +416,10 @@ export function useVFS(workspaceId: string): UseVFSResult {
         // workspace row, so the object captured before them no longer reflects
         // what is on disk.
         const current = (await getDB().workspaces.get(workspaceId)) ?? ensured;
-        const reconciled = await reconcileWorkspaceTabs(current, live, starterFileId);
+        const reconciled = await reconcileWorkspaceTabs(current, live, {
+          preferFileId: starterFileId,
+          autoOpenFirstFile: true,
+        });
 
         if (!mountedRef.current) return;
         setWorkspace(reconciled.workspace);
@@ -778,8 +813,7 @@ export function useVFS(workspaceId: string): UseVFSResult {
     const live = await loadNodes();
     // An imported snapshot can land with files but no tabs; open the first one
     // so the editor is never left bound to nothing.
-    const fallbackFileId = sortVFSNodes(live).find(isVirtualFile)?.id ?? null;
-    const reconciled = await reconcileWorkspaceTabs(current, live, fallbackFileId);
+    const reconciled = await reconcileWorkspaceTabs(current, live, { autoOpenFirstFile: true });
     if (mountedRef.current) setWorkspace(reconciled.workspace);
   }, [loadNodes, workspaceId]);
 

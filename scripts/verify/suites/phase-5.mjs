@@ -837,4 +837,99 @@ async function runSuite({ page, browser, url, suite }) {
   } finally {
     await alternatePage.close();
   }
+
+  // ── stranded workspace: navigation must never be hidden ─────────────────────
+  // A workspace that holds directories but no files cannot auto-open anything,
+  // and the editor correctly reports "No open editors". At a narrow width the
+  // sidebar is collapsed by default, which would leave the user staring at that
+  // message with no visible route to the explorer. On a second origin, so the
+  // main page's state is untouched.
+  const strandedPage = await browser.newPage();
+  try {
+    await strandedPage.setViewport({ width: 900, height: 800, deviceScaleFactor: 1 });
+    await strandedPage.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await strandedPage.waitForSelector('[data-testid^="editor-tab-"]', { timeout: 60000 });
+
+    const emptied = await strandedPage.evaluate(async () => {
+      const db = await new Promise((resolve, reject) => {
+        const request = indexedDB.open('LANCodeCollab-meta');
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+
+      const readAll = (store) =>
+        new Promise((resolve, reject) => {
+          const request = db.transaction(store, 'readonly').objectStore(store).getAll();
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+        });
+
+      const nodes = await readAll('nodes');
+      const workspaces = await readAll('workspaces');
+      // The application runs a single workspace; take the id from the nodes
+      // themselves rather than duplicating the constant here.
+      const workspaceId = nodes[0]?.workspaceId ?? null;
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      const doomed = nodes
+        .filter((node) => node.workspaceId === workspaceId && node.type === 'file')
+        .map((node) => node.id);
+
+      // Keep one directory so the tree is not empty enough to trigger the
+      // starter re-seed; that would auto-open a file and mask the stranded path.
+      await new Promise((resolve, reject) => {
+        const transaction = db.transaction(['nodes', 'workspaces'], 'readwrite');
+        for (const id of doomed) transaction.objectStore('nodes').delete(id);
+        transaction.objectStore('workspaces').put({
+          ...workspace,
+          activeFileId: null,
+          openFileIds: [],
+          updatedAt: Date.now(),
+        });
+        transaction.oncomplete = () => resolve(undefined);
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error);
+      });
+      db.close();
+
+      return { removedFiles: doomed.length, workspaceId: workspaceId ?? null };
+    });
+
+    suite.atLeast('the stranded fixture removes every file', emptied.removedFiles, 2);
+
+    await strandedPage.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+    await strandedPage.waitForSelector('[data-testid="vscode-shell"]', { timeout: 60000 });
+
+    const strandedRevealed = await strandedPage
+      .waitForFunction(
+        () =>
+          Boolean(document.querySelector('[data-testid="primary-sidebar"]')) &&
+          Boolean(document.querySelector('[data-testid="file-explorer"]')),
+        { timeout: 20000, polling: 200 },
+      )
+      .then(() => true)
+      .catch(() => false);
+
+    suite.ok(
+      'a workspace with no openable file reveals the explorer',
+      strandedRevealed,
+    );
+
+    const strandedUi = await strandedPage.evaluate(() => ({
+      sidebar: Boolean(document.querySelector('[data-testid="primary-sidebar"]')),
+      explorer: Boolean(document.querySelector('[data-testid="file-explorer"]')),
+      createFile: Boolean(document.querySelector('[data-testid="explorer-new-file"]')),
+      tabs: document.querySelectorAll('[data-testid^="editor-tab-"][role="tab"]').length,
+      emptyState: Boolean(document.querySelector('[data-testid="editor-empty-state"]')),
+    }));
+    suite.ok('the sidebar is open rather than collapsed', strandedUi.sidebar);
+    suite.ok('the explorer is the active view', strandedUi.explorer);
+    suite.ok(
+      'a file can be created from the stranded screen',
+      strandedUi.createFile,
+    );
+    suite.equal('no phantom editor tab is invented', strandedUi.tabs, 0);
+    suite.ok('the editor explains that no file is open', strandedUi.emptyState);
+  } finally {
+    await strandedPage.close();
+  }
 }
