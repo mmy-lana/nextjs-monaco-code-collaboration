@@ -24,6 +24,7 @@ import {
   parseWorkspaceSnapshot,
 } from '@/services/workspaceSnapshot';
 import { DEFAULT_SIGNALING, resolveDefaultSignalingServers } from '@/services/signalingConfig';
+import { getFileText } from '@/services/yjsProvider';
 import { isVirtualFile, type VFSNode, type VirtualDirectory } from '@/types/workspace';
 import {
   DEFAULT_MONACO_CONFIG,
@@ -44,6 +45,14 @@ const SETTINGS_STORAGE_KEY = 'LANCodeCollab:editor-config';
 const LAYOUT_STORAGE_KEY = 'LANCodeCollab:layout';
 const SIDEBAR_DEFAULT_WIDTH = 260;
 const PANEL_DEFAULT_HEIGHT = 220;
+
+/**
+ * How long file hydration waits for `y-indexeddb` to restore the room before
+ * falling back to the Dexie snapshot. Long enough for a cold IndexedDB open on a
+ * busy machine, short enough that a browser denying storage shows the snapshot
+ * rather than an empty editor.
+ */
+const CRDT_RESTORE_WAIT_MS = 1500;
 
 interface LayoutState {
   sidebarWidth: number;
@@ -214,27 +223,70 @@ const logOutput = useCallback((line: string) => {
     setActiveContent('');
   }
 
+  /** True once `y-indexeddb` has restored this room into the CRDT. */
+  const persistenceSynced = collab.stats?.persistenceSynced ?? false;
+
+  /*
+   * Hydrates the active file from the CRDT, falling back to Dexie.
+   *
+   * The order matters and is the second half of the split-brain fix. The CRDT is
+   * the shared source of truth and Dexie is only its mirror, so a populated
+   * `Y.Text` always wins — otherwise a reload would show the snapshot even when
+   * the live document had moved on.
+   *
+   * Waiting for `persistenceSynced` is what keeps that ordering honest. The
+   * restore is asynchronous, so a Dexie read issued first would return a snapshot
+   * of an empty CRDT; the binding would then adopt that text into the empty
+   * `Y.Text`, and the restore would merge the real document into the stale one.
+   * The wait is bounded so a blocked or unavailable IndexedDB degrades to the Dexie
+   * snapshot instead of leaving the editor permanently blank. This effect re-runs
+   * when the flag flips, and the cleanup cancels the superseded pass, so the fast
+   * path never waits at all.
+   */
   useEffect(() => {
-    if (!activeFileId) return undefined;
+    if (!activeFileId || !collab.doc) return undefined;
 
     let cancelled = false;
-    void vfs
-      .loadFileContent(activeFileId)
-      .then((text) => {
-        if (cancelled) return;
-        setActiveContent((current) => (current === text ? current : text));
-      })
-      .catch((error: unknown) => {
+    let waitTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const apply = (text: string) => {
+      if (cancelled) return;
+      setActiveContent((current) => (current === text ? current : text));
+    };
+
+    const hydrate = async () => {
+      if (!persistenceSynced) {
+        await new Promise<void>((resolve) => {
+          waitTimer = setTimeout(resolve, CRDT_RESTORE_WAIT_MS);
+        });
+      }
+      if (cancelled) return;
+
+      const crdtText = getFileText(collab.doc!, activeFileId).toString();
+      if (crdtText.length > 0) {
+        apply(crdtText);
+        // Bring the mirror in line with what was just adopted.
+        void vfs.saveFileContent(activeFileId, crdtText);
+        return;
+      }
+
+      try {
+        apply(await vfs.loadFileContent(activeFileId));
+      } catch (error: unknown) {
         if (cancelled) return;
         logOutput(
           `could not read ${activeFileId}: ${error instanceof Error ? error.message : 'unknown error'}`,
         );
-      });
+      }
+    };
+
+    void hydrate();
 
     return () => {
       cancelled = true;
+      if (waitTimer !== null) clearTimeout(waitTimer);
     };
-  }, [activeFileId, vfs.loadFileContent, logOutput]);
+  }, [activeFileId, collab.doc, logOutput, persistenceSynced, vfs.loadFileContent, vfs.saveFileContent]);
 
     const handleCursorChange = useCallback(
     (position: { line: number; column: number }, selectionLength: number) => {
@@ -264,6 +316,32 @@ const logOutput = useCallback((line: string) => {
       void vfs.saveFileContent(activeFileId, next).then((result) => {
         if (!result.ok && result.error) {
           logOutput(`storage rejected an edit to ${activeFileId}: ${result.error}`);
+        }
+      });
+    },
+    [activeFileId, logOutput, vfs.saveFileContent],
+  );
+
+  /*
+   * A peer edit arrives in the CRDT but not through the local model listener,
+   * because the binding suppresses its own echo. Left unmirrored, Dexie kept only
+   * the local user's keystrokes and a reload hydrated a snapshot from before the
+   * peer's work — the two stores disagreed and the editor showed the older text.
+   * Mirroring here keeps Dexie a strict mirror of the CRDT.
+   *
+   * The id arrives with the payload because this is debounced: by the time it
+   * runs the user may have switched files, and only the id identifies which
+   * file the text belongs to.
+   */
+  const handleRemoteContentChange = useCallback(
+    (fileId: string, next: string) => {
+      if (fileId === activeFileId) {
+        setActiveContent((current) => (current === next ? current : next));
+      }
+
+      void vfs.saveFileContent(fileId, next).then((result) => {
+        if (!result.ok && result.error) {
+          logOutput(`storage rejected a remote edit to ${fileId}: ${result.error}`);
         }
       });
     },
@@ -876,6 +954,7 @@ const logOutput = useCallback((line: string) => {
             onDiagnosticsChange={handleDiagnosticsChange}
             onCursorChange={handleCursorChange}
             onContentChange={handleContentChange}
+        onRemoteContentChange={handleRemoteContentChange}
           />
         }
         panelOpen={panelOpen}

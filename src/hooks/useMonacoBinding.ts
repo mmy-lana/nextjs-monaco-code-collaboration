@@ -35,6 +35,16 @@ export const CURSOR_LABEL_TTL_MS = 3000;
  */
 export const PRESENCE_THROTTLE_MS = 50;
 
+/**
+ * Debounce before a remote edit is mirrored into the Dexie snapshot store.
+ *
+ * Remote edits arrive one CRDT transaction per keystroke. Writing each one
+ * would put an IndexedDB transaction in the path of another user's typing; this
+ * window collapses a burst into a single write while staying far inside the
+ * interval at which a reader could observe a stale snapshot.
+ */
+export const REMOTE_PERSIST_DEBOUNCE_MS = 400;
+
 const PEER_STYLE_ELEMENT_ID = 'y-peer-cursor-styles';
 const peerColorClasses = new Map<string, string>();
 
@@ -82,6 +92,16 @@ export interface UseMonacoBindingOptions {
   initialContent?: string;
   /** Fired on every local edit so the caller can debounce persistence. */
   onLocalChange?: (value: string) => void;
+  /**
+   * Fired when text changed in the CRDT but not in this editor — a peer edit, a
+   * snapshot import, or the document being restored from `y-indexeddb`.
+   *
+   * The file id is passed explicitly rather than left implicit in host state:
+   * the call is debounced, so by the time it runs the user may have switched
+   * tabs, and an implicitly-current file id would write one file's body over
+   * another.
+   */
+  onRemoteChange?: (fileId: string, value: string) => void;
 }
 
 /**
@@ -162,11 +182,14 @@ export function useMonacoBinding({
   provider,
   initialContent = '',
   onLocalChange,
+  onRemoteChange,
 }: UseMonacoBindingOptions): void {
   const decorationsRef = useRef<string[]>([]);
   const isApplyingRemoteRef = useRef(false);
   const localChangeRef = useRef(onLocalChange);
   localChangeRef.current = onLocalChange;
+  const remoteChangeRef = useRef(onRemoteChange);
+  remoteChangeRef.current = onRemoteChange;
 
   const clearRemoteDecorations = useCallback(() => {
     if (!editor) return;
@@ -186,6 +209,46 @@ export function useMonacoBinding({
     // different files never contend on the same CRDT node.
     const yText = getFileText(doc, fileId);
     const disposables: IDisposable[] = [];
+
+    /*
+     * Mirror for text that changed in the CRDT but not in this editor.
+     *
+     * `handleYTextChange` runs with `isApplyingRemoteRef` set, so the model
+     * listener below deliberately skips these edits — which is what stops the
+     * edit loop, and also meant the Dexie snapshot was only ever written when the
+     * *local* user typed. A peer's keystrokes reached the CRDT and
+     * `y-indexeddb` but not Dexie, so a reload hydrated a stale snapshot. This
+     * path closes that gap: identical suppression, opposite destination.
+     *
+     * `lastMirrored` starts at the current text so the binding's own
+     * reconciliation (which uses MONACO_ORIGIN and therefore never reaches the
+     * remote handler) cannot trigger a redundant write.
+     */
+    let mirroredText = yText.toString();
+    let pendingMirror: { fileId: string; value: string } | null = null;
+    let mirrorTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const flushMirror = (): void => {
+      if (mirrorTimer !== null) {
+        clearTimeout(mirrorTimer);
+        mirrorTimer = null;
+      }
+      if (!pendingMirror) return;
+
+      const { fileId: pendingFileId, value } = pendingMirror;
+      pendingMirror = null;
+      remoteChangeRef.current?.(pendingFileId, value);
+    };
+
+    const scheduleMirror = (): void => {
+      const next = yText.toString();
+      if (next === mirroredText) return;
+
+      mirroredText = next;
+      pendingMirror = { fileId, value: next };
+      if (mirrorTimer !== null) clearTimeout(mirrorTimer);
+      mirrorTimer = setTimeout(flushMirror, REMOTE_PERSIST_DEBOUNCE_MS);
+    };
 
     /*
      * Reconcile the model and the CRDT exactly once per binding.
@@ -287,6 +350,9 @@ export function useMonacoBinding({
       } finally {
         isApplyingRemoteRef.current = false;
       }
+
+      // The model now mirrors the CRDT; the snapshot store has to follow it.
+      scheduleMirror();
     };
 
     yText.observe(handleYTextChange);
@@ -447,6 +513,13 @@ export function useMonacoBinding({
     });
 
     return () => {
+      /*
+       * Flushed rather than cancelled: switching away from a file whose text
+       * just changed remotely must still persist that text, or the next visit
+       * hydrates the snapshot from before the peer edit. The id travels with the
+       * payload, so this cannot land on the file the user switched to.
+       */
+      flushMirror();
       for (const disposable of disposables) disposable.dispose();
       clearRemoteDecorations();
     };

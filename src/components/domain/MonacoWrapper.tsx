@@ -60,6 +60,16 @@ export interface MonacoWrapperProps {
   config?: MonacoEditorConfig;
   /** Called (debounced) after local edits so the VFS can persist them. */
   onContentChange?: (value: string) => void;
+  /**
+   * Called when the CRDT changed this file's text without this editor typing —
+   * a peer edit, a snapshot import, or the `y-indexeddb` restore on load.
+   *
+   * Without it the Dexie snapshot only ever records the local user's keystrokes,
+   * so a peer edit would exist in the CRDT and disappear on reload. The file id
+   * is passed explicitly because the call is debounced and may land after the
+   * user has switched tabs.
+   */
+  onRemoteContentChange?: (fileId: string, value: string) => void;
   /** Cursor/selection reporting for the status bar. */
   onCursorChange?: (position: { line: number; column: number }, selectionLength: number) => void;
   /**
@@ -89,6 +99,7 @@ export function MonacoWrapper({
   provider,
   config = DEFAULT_MONACO_CONFIG,
   onContentChange,
+  onRemoteContentChange,
   onCursorChange,
   onEditorReady,
   onDiagnosticsChange,
@@ -116,6 +127,8 @@ export function MonacoWrapper({
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const onContentChangeRef = useRef(onContentChange);
   onContentChangeRef.current = onContentChange;
+  const onRemoteContentChangeRef = useRef(onRemoteContentChange);
+  onRemoteContentChangeRef.current = onRemoteContentChange;
 
   /** Last position already reported upstream, used to suppress no-op updates. */
   const reportedCursorRef = useRef<{
@@ -220,7 +233,21 @@ export function MonacoWrapper({
   }, [editor]);
 
   // ── CRDT binding ────────────────────────────────────────────────────────────
-  useMonacoBinding({ editor, doc, fileId, provider, initialContent: value, onLocalChange: handleLocalChange });
+  useMonacoBinding({
+    editor,
+    doc,
+    fileId,
+    provider,
+    initialContent: value,
+    onLocalChange: handleLocalChange,
+    /*
+     * Read through a ref rather than bound per render: the binding's effect must
+     * not restart (and re-run its one-time CRDT reconciliation) every time the
+     * host re-renders with a new callback identity.
+     */
+    onRemoteChange: (changedFileId, next) =>
+      onRemoteContentChangeRef.current?.(changedFileId, next),
+  });
 
   /*
    * Late content hydration.

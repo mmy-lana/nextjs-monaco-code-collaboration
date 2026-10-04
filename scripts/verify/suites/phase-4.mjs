@@ -476,6 +476,63 @@ async function runSuite({ page, browser, url, suite }) {
   );
   suite.ok('local edits are persisted to IndexedDB within the debounce window', true);
 
+  // ── STEP 3: a peer's edit must reach Dexie too ──────────────────────────────
+  // `handleYTextChange` applies remote operations to the model with the echo
+  // suppression raised, so the local-change listener never fires for them. Dexie
+  // used to be written only by the local user's keystrokes, which meant the
+  // snapshot store silently diverged from the CRDT and a reload showed text from
+  // before the peer's work. The update below is authored by a separate document
+  // and merged under a foreign origin, which is exactly what a peer sends.
+  const remoteMarker = `REMOTE_${Date.now()}`;
+  const boundFileId = await page.$eval('[data-testid="vfs-active"]', (el) => el.textContent ?? '');
+  suite.ok('a file is bound before the remote edit is injected', boundFileId.length > 0, boundFileId);
+
+  await page.evaluate(
+    (id, text) => {
+      window.__phase4ApplyRemoteUpdate?.(id, text);
+    },
+    boundFileId,
+    remoteMarker,
+  );
+
+  const remoteReachedModel = await page
+    .waitForFunction(
+      (text) => (window.__phase4Editor.getText() ?? '').includes(text),
+      { timeout: 15000, polling: 200 },
+      remoteMarker,
+    )
+    .then(() => true)
+    .catch(() => false);
+  suite.ok('a peer-authored update reaches the editor model', remoteReachedModel, remoteMarker);
+
+  const dexieMirrored = await page
+    .waitForFunction(
+      async (text) => {
+        const db = await new Promise((resolve, reject) => {
+          const request = indexedDB.open('LANCodeCollab-meta');
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+        });
+        const contents = await new Promise((resolve, reject) => {
+          const request = db.transaction('contents', 'readonly').objectStore('contents').getAll();
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+        });
+        db.close();
+        return contents.some((content) => (content.plainText ?? '').includes(text));
+      },
+      { timeout: 20000, polling: 500 },
+      remoteMarker,
+    )
+    .then(() => true)
+    .catch(() => false);
+
+  suite.ok(
+    "a peer's edit is mirrored into the Dexie snapshot, not just the CRDT",
+    dexieMirrored,
+    `marker ${remoteMarker} absent from the contents table`,
+  );
+
   await captureScreenshot(page, 'phase-4-editor-desktop');
 
   // ── two-peer collaboration ──────────────────────────────────────────────────

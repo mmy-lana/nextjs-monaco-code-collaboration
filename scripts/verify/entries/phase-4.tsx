@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { editor as MonacoEditorNamespace } from 'monaco-editor';
-import type * as Y from 'yjs';
+import * as Y from 'yjs';
 import type { VFSNode } from '@/types/workspace';
 import { MonacoWrapper } from '@/components/domain/MonacoWrapper';
 import { MobileKeyboardBar, type KeyboardBarCommand } from '@/components/layout/MobileKeyboardBar';
@@ -16,6 +16,9 @@ import { parseSignalingServers, defaultSignalingUrl, toSignalingUrl } from '@/se
 import { parseWorkspaceSnapshot, encodeWorkspaceSnapshot } from '@/services/workspaceSnapshot';
 import { sanitizePeerName, isValidHexColor, sanitizePeerColor } from '@/utils/colorGenerator';
 import { DEFAULT_MONACO_CONFIG } from '@/types/editor';
+
+/** Transaction origin standing in for an edit authored by another peer. */
+const PHASE4_REMOTE_ORIGIN = 'phase4-remote-peer';
 
 const WORKSPACE_ID = 'phase4-workspace';
 const ROOM_ID = 'phase4-room';
@@ -47,9 +50,13 @@ let createCounter = 0;
 let lastError: string | null = null;
 const shortcutHits: string[] = [];
 
+/** Live CRDT document, exposed so the suite can inject a peer-authored update. */
+const collabDocRef: { current: Y.Doc | null } = { current: null };
+
 function Phase4App() {
   const [enabled, setEnabled] = useState(true);
   const collab = useYjsCollaboration({ roomId: ROOM_ID, enabled, signalingServers: [] });
+  collabDocRef.current = collab.doc;
   const vfs = useVFS(WORKSPACE_ID);
   const viewport = useResponsiveLayout();
   const editorRef = useRef<MonacoEditorNamespace.IStandaloneCodeEditor | null>(null);
@@ -445,6 +452,14 @@ function Phase4App() {
             setContent(next);
             if (activeFileId) void vfs.saveFileContent(activeFileId, next);
           }}
+          /*
+           * Mirrors page.tsx: a peer's edit reaches the model through the
+           * binding's echo suppression, so it would never reach `onContentChange`
+           * and the Dexie snapshot would drift behind the CRDT.
+           */
+          onRemoteContentChange={(fileId, next) => {
+            void vfs.saveFileContent(fileId, next);
+          }}
         />
       </div>
 
@@ -497,6 +512,12 @@ declare global {
       trigger: (source: string, command: string, payload: unknown) => void;
     };
     __phase4Read?: (doc: Y.Doc, fileId: string) => string;
+    /**
+     * Applies an update authored outside this tab, exactly as a peer's CRDT
+     * transaction arrives: a foreign document merged in with a non-local
+     * transaction origin.
+     */
+    __phase4ApplyRemoteUpdate?: (fileId: string, text: string) => void;
     __phase4Root?: { render: (node: React.ReactNode) => void; unmount: () => void };
   }
 }
@@ -691,6 +712,28 @@ export function mountPhase4(container: HTMLElement): void {
   window.__phase4Root.render(<Phase4App />);
   window.__phase4Probe = buildProbe();
   window.__phase4Read = (doc, fileId) => getFileText(doc, fileId).toString();
+
+  /*
+   * Builds a genuine remote transaction. A peer that had already synced holds
+   * the same CRDT lineage, so its edit merges into the existing `Y.Text` and
+   * fires that text's observer — which is what makes this reach the model and
+   * the snapshot mirror. Re-setting the map entry instead would swap in a new
+   * `Y.Text` and never touch the one the binding is bound to.
+   */
+  window.__phase4ApplyRemoteUpdate = (fileId, text) => {
+    const live = collabDocRef.current;
+    if (!live) return;
+
+    const remote = new Y.Doc();
+    Y.applyUpdate(remote, Y.encodeStateAsUpdate(live));
+
+    const remoteText = getFileText(remote, fileId);
+    const stateVectorBeforeEdit = Y.encodeStateVector(remote);
+    remoteText.insert(remoteText.length, text);
+
+    Y.applyUpdate(live, Y.encodeStateAsUpdate(remote, stateVectorBeforeEdit), PHASE4_REMOTE_ORIGIN);
+    remote.destroy();
+  };
 }
 
 const tryMount = (): void => {
