@@ -19,11 +19,30 @@ connection.
 
 ```bash
 pnpm install
-pnpm run dev          # http://localhost:3000
+pnpm run dev          # http://localhost:3000, bound to every interface
 ```
 
 `dev` and `build` bundle the Monaco language-service workers first; see
 [Workers](#monaco-workers) below.
+
+### Reaching the dev server from another host
+
+The dev server binds `0.0.0.0`, so `http://<your-lan-ip>:3000` and alternate
+loopback addresses such as `http://127.0.2.2:3000` both serve the app. That
+needs two things working together:
+
+- `next dev -H 0.0.0.0`, so the port is not confined to `127.0.0.1`.
+- `allowedDevOrigins` in `next.config.ts`, because Next.js answers `/_next/*`
+  requests — including the HMR WebSocket upgrade — only to `localhost` and
+  `*.localhost` unless a host is listed. A refused upgrade does not merely cost
+  you hot reload: the Turbopack dev client never finishes booting, so the page
+  sits on its server-rendered shell with no hydration and no workspace.
+
+Loopback aliases (`127.*`), the RFC 1918 private ranges and `*.local` are
+allowlisted. The rule is development-only — it is gated behind `opts.dev` — so
+`next build` and `next start` are unaffected. Note that each host is a separate
+browser partition: the workspace is stored per origin, so opening the app on a
+second address seeds its own starter tree.
 
 ### Pairing two devices
 
@@ -44,7 +63,7 @@ With no signaling server the editor still syncs between tabs of the same browser
 
 | Command | Purpose |
 |---|---|
-| `pnpm run dev` | Build workers, then start the dev server |
+| `pnpm run dev` | Build workers, then start the dev server on all interfaces |
 | `pnpm run build` | Build workers, then a production build |
 | `pnpm run start` | Serve the production build |
 | `pnpm run typecheck` | `tsc --noEmit` |
