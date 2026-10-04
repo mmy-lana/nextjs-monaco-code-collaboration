@@ -16,6 +16,10 @@ import { useResponsiveLayout } from '@/hooks/useResponsiveLayout';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
 import type { KeyboardBarCommand } from '@/components/layout/MobileKeyboardBar';
 import { getDB } from '@/db/schema';
+import {
+  encodeWorkspaceSnapshot,
+  parseWorkspaceSnapshot,
+} from '@/services/workspaceSnapshot';
 import { DEFAULT_SIGNALING } from '@/services/signalingConfig';
 import { isVirtualFile, type VFSNode, type VirtualDirectory } from '@/types/workspace';
 import {
@@ -312,21 +316,17 @@ const logOutput = useCallback((line: string) => {
   const handleExport = useCallback(() => {
     void (async () => {
       const db = getDB();
-      const [nodes, contents, workspaces] = await Promise.all([
-        db.nodes.toArray(),
-        db.contents.toArray(),
-        db.workspaces.toArray(),
-      ]);
-      const payload = {
-        format: 'lancodecollab/workspace',
-        version: 1,
-        exportedAt: new Date().toISOString(),
+      const [nodes, contents] = await Promise.all([db.nodes.toArray(), db.contents.toArray()]);
+
+      const payload = encodeWorkspaceSnapshot({
         workspace: vfs.workspace,
-        nodes,
-        contents,
-        workspaces,
-        crdt: collab.doc ? Array.from(Y.encodeStateAsUpdate(collab.doc)) : null,
-      };
+        nodes: nodes.filter((node) => node.workspaceId === WORKSPACE_ID),
+        contents: contents.map((content) => ({
+          contentId: content.contentId,
+          plainText: content.plainText,
+        })),
+        crdt: collab.doc ? Y.encodeStateAsUpdate(collab.doc) : null,
+      });
 
       const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
@@ -342,23 +342,34 @@ const logOutput = useCallback((line: string) => {
   const handleImport = useCallback(
     (file: File) => {
       void (async () => {
-        try {
-          const parsed = JSON.parse(await file.text()) as {
-            format?: string;
-            nodes?: VFSNode[];
-            contents?: { contentId: string; plainText: string; updatedAt: number }[];
-            crdt?: number[] | null;
-          };
-          if (parsed.format !== 'lancodecollab/workspace') {
-            logOutput('import failed: unrecognised snapshot format');
-            return;
-          }
+        let parsed: unknown;
 
+        try {
+          parsed = JSON.parse(await file.text());
+        } catch {
+          logOutput('import failed: file is not valid JSON');
+          return;
+        }
+
+        // Nothing below this line runs on unvalidated input: the snapshot is a
+        // user-supplied file that reaches Dexie and a live CRDT.
+        const validation = parseWorkspaceSnapshot(parsed, WORKSPACE_ID);
+        if (!validation.ok) {
+          logOutput(`import rejected: ${validation.error}`);
+          return;
+        }
+
+        const { snapshot, rejected } = validation;
+        if (rejected.length > 0) {
+          logOutput(`import skipped ${rejected.length} invalid entrie(s): ${rejected[0]}`);
+        }
+
+        try {
           const db = getDB();
           await db.transaction('rw', db.nodes, db.contents, async () => {
-            await db.nodes.bulkPut((parsed.nodes ?? []).filter((node) => node.workspaceId === WORKSPACE_ID));
+            await db.nodes.bulkPut(snapshot.nodes);
             await db.contents.bulkPut(
-              (parsed.contents ?? []).map((content) => ({
+              snapshot.contents.map((content) => ({
                 contentId: content.contentId,
                 binaryState: new Uint8Array(0),
                 plainText: content.plainText,
@@ -368,14 +379,17 @@ const logOutput = useCallback((line: string) => {
             );
           });
 
-          if (parsed.crdt && collab.doc) {
-            Y.applyUpdate(collab.doc, new Uint8Array(parsed.crdt), 'snapshot-import');
+          if (snapshot.crdt && snapshot.crdt.length > 0 && collab.doc) {
+            Y.applyUpdate(collab.doc, new Uint8Array(snapshot.crdt), 'snapshot-import');
           }
 
           await vfs.refresh();
-          logOutput(`imported snapshot (${(parsed.nodes ?? []).length} nodes)`);
+          await vfs.reconcileTabs();
+          logOutput(`imported snapshot (${snapshot.nodes.length} nodes)`);
         } catch (importError) {
-          logOutput(`import failed: ${importError instanceof Error ? importError.message : 'unknown error'}`);
+          logOutput(
+            `import failed: ${importError instanceof Error ? importError.message : 'unknown error'}`,
+          );
         }
       })();
     },

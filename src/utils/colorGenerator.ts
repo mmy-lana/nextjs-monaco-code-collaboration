@@ -23,6 +23,56 @@ const PEER_COLORS = [
 
 export const PEER_COLOR_PALETTE: readonly string[] = Object.freeze(PEER_COLORS);
 
+/**
+ * Strict six-digit hex colour.
+ *
+ * Peer colours arrive over the WebRTC awareness channel from untrusted peers and
+ * are interpolated into a global stylesheet, so anything that is not exactly a
+ * hex triplet is rejected outright — a permissive pattern here would let a peer
+ * inject arbitrary CSS through a crafted "colour".
+ */
+const HEX_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
+
+/** Narrows an untrusted value to a renderable hex colour. */
+export function isValidHexColor(value: unknown): value is string {
+  return typeof value === 'string' && HEX_COLOR_PATTERN.test(value);
+}
+
+/**
+ * Returns a safe colour for an untrusted peer payload.
+ *
+ * Invalid values fall back to a deterministic colour derived from the peer id,
+ * so a malicious or buggy peer degrades to an ordinary cursor instead of
+ * reaching the stylesheet.
+ */
+export function sanitizePeerColor(value: unknown, seed: string): string {
+  if (isValidHexColor(value)) return value;
+  return colorFromSeed(seed);
+}
+
+/**
+ * Strips Markdown control characters from an untrusted display name.
+ *
+ * Names are rendered inside Monaco's Markdown hover widget; raw formatting
+ * characters there could spoof the label or break the surrounding message.
+ */
+export function sanitizePeerName(value: string, maxLength = 40): string {
+  let cleaned = '';
+  for (const character of value) {
+    const code = character.codePointAt(0) ?? 0;
+    cleaned += code < 32 || code === 127 ? ' ' : character;
+  }
+
+  // `#` is deliberately preserved: generated identities look like
+  // `SwiftCoder#123`, and it has no inline formatting effect inside the
+  // `**bold**` hover the label is rendered in.
+  return cleaned
+    .replace(/[*_`[\]{}<>|\\]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLength);
+}
+
 /** FNV-1a: small, fast, and stable across engines (unlike `String.hashCode` shims). */
 export function hashString(input: string): number {
   let hash = 0x811c9dc5;

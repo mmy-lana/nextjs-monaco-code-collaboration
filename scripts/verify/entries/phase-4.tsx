@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { editor as MonacoEditorNamespace } from 'monaco-editor';
 import type * as Y from 'yjs';
+import type { VFSNode } from '@/types/workspace';
 import { MonacoWrapper } from '@/components/domain/MonacoWrapper';
 import { MobileKeyboardBar, type KeyboardBarCommand } from '@/components/layout/MobileKeyboardBar';
 import { useVFS } from '@/hooks/useVFS';
@@ -12,6 +13,8 @@ import { parsePeerState } from '@/hooks/useMonacoBinding';
 import { buildMonacoOptions } from '@/components/domain/MonacoWrapper';
 import { getFileText } from '@/services/yjsProvider';
 import { parseSignalingServers, defaultSignalingUrl, toSignalingUrl } from '@/services/signalingConfig';
+import { parseWorkspaceSnapshot, encodeWorkspaceSnapshot } from '@/services/workspaceSnapshot';
+import { sanitizePeerName, isValidHexColor, sanitizePeerColor } from '@/utils/colorGenerator';
 import { DEFAULT_MONACO_CONFIG } from '@/types/editor';
 
 const WORKSPACE_ID = 'phase4-workspace';
@@ -448,8 +451,21 @@ function Phase4App() {
 }
 
 export interface Phase4Probe {
+  injectedColorRejected: boolean;
+  injectedColorSafe: boolean;
+  injectedNameSanitized: string;
+  hexValidation: boolean;
+  snapshotRejectsUnknownFormat: boolean;
+  snapshotRejectsWrongWorkspace: boolean;
+  snapshotRejectsCyclicParent: boolean;
+  snapshotRejectsBadCrdt: boolean;
+  snapshotRejectsOversizedContent: boolean;
+  snapshotRebuildsNestedPaths: string[];
+  snapshotRejectsDuplicatePath: number;
+  snapshotRoundTripNodes: number;
   malformedStatesRejected: number;
   partiallyMalformedStatesDegraded: number;
+  missingColourStillAdmitted: boolean;
   validStateParsed: boolean;
   signalingValid: string[];
   signalingInvalid: string[];
@@ -493,6 +509,20 @@ function buildProbe(): Phase4Probe {
     { user: { name: 'ok', color: '#fff', cursor: { line: 0, column: -3 } } },
   ];
 
+  const injectionPayload = 'red;} body{display:none} .x::after{content:"leaked"}';
+
+  const injected = parsePeerState({
+    user: {
+      name: 'Mallory',
+      color: injectionPayload,
+      clientId: 99,
+      cursor: { line: 1, column: 1 },
+      activeFileId: 'f1',
+      lastActive: 1,
+      isHost: false,
+    },
+  });
+
   const rejected = malformed.filter((state) => parsePeerState(state) === null).length;
   // Partially malformed payloads must degrade (drop the bad field) rather than
   // evict the peer from the roster entirely.
@@ -519,8 +549,114 @@ function buildProbe(): Phase4Probe {
   const parsedSignaling = parseSignalingServers('ws://a:4444\nnot-a-url\nwss://b:4444\nws://a:4444');
   const options = buildMonacoOptions(DEFAULT_MONACO_CONFIG);
 
+  // Snapshot validation: hostile and malformed payloads must be refused or
+  // repaired before they can reach Dexie or a live CRDT.
+  const hostileNode: VFSNode & { contentId: string } = {
+    id: 'evil',
+    workspaceId: 'phase4-workspace',
+    parentId: null,
+    name: 'evil.ts',
+    type: 'file',
+    path: '/evil.ts',
+    language: 'typescript',
+    contentId: 'evil',
+    createdAt: 1,
+    updatedAt: 1,
+    deletedAt: null,
+    size: 0,
+  };
+
+  const unknownFormat = parseWorkspaceSnapshot({ format: 'evil/app' }, 'phase4-workspace');
+  const wrongWorkspace = parseWorkspaceSnapshot(
+    { format: 'lancodecollab/workspace', version: 1, nodes: [{ ...hostileNode, workspaceId: 'other' }] },
+    'phase4-workspace',
+  );
+  const cyclic = parseWorkspaceSnapshot(
+    {
+      format: 'lancodecollab/workspace',
+      version: 1,
+      nodes: [
+        { ...hostileNode, id: 'a', name: 'a.ts', parentId: 'b' },
+        { ...hostileNode, id: 'b', name: 'b.ts', parentId: 'a' },
+      ],
+    },
+    'phase4-workspace',
+  );
+  const badCrdt = parseWorkspaceSnapshot(
+    { format: 'lancodecollab/workspace', version: 1, nodes: [], crdt: [1, 2, 'x'] },
+    'phase4-workspace',
+  );
+  const oversized = parseWorkspaceSnapshot(
+    {
+      format: 'lancodecollab/workspace',
+      version: 1,
+      nodes: [hostileNode],
+      contents: [{ contentId: 'evil', plainText: 'x'.repeat(600_000) }],
+    },
+    'phase4-workspace',
+  );
+  const nested = parseWorkspaceSnapshot(
+    {
+      format: 'lancodecollab/workspace',
+      version: 1,
+      nodes: [
+        { ...hostileNode, id: 'dir', name: 'src', type: 'directory', contentId: 'dir' },
+        { ...hostileNode, id: 'leaf', name: 'leaf.ts', parentId: 'dir' },
+      ],
+    },
+    'phase4-workspace',
+  );
+  const duplicatePath = parseWorkspaceSnapshot(
+    {
+      format: 'lancodecollab/workspace',
+      version: 1,
+      nodes: [
+        { ...hostileNode, id: 'one', name: 'same.ts' },
+        { ...hostileNode, id: 'two', name: 'same.ts' },
+      ],
+    },
+    'phase4-workspace',
+  );
+
+  const roundTrip = parseWorkspaceSnapshot(
+    JSON.parse(
+      JSON.stringify(
+        encodeWorkspaceSnapshot({
+          workspace: null,
+          nodes: [hostileNode],
+          contents: [{ contentId: 'evil', plainText: 'hello' }],
+          crdt: new Uint8Array([1, 2, 3]),
+        }),
+      ),
+    ),
+    'phase4-workspace',
+  );
+
   return {
+    injectedColorRejected: injected === null || isValidHexColor(injected.color),
+    injectedColorSafe: injected !== null && isValidHexColor(injected.color),
+    injectedNameSanitized: sanitizePeerName('**Mallory** [bold]'),
+    hexValidation:
+      isValidHexColor('#ff8811') &&
+      !isValidHexColor('red;} body{display:none}') &&
+      !isValidHexColor('#fff') &&
+      !isValidHexColor('rgb(1,2,3)') &&
+      sanitizePeerColor('not-a-color', 'seed').startsWith('#'),
+    snapshotRejectsUnknownFormat: !unknownFormat.ok,
+    snapshotRejectsWrongWorkspace: wrongWorkspace.ok && wrongWorkspace.rejected.length === 1,
+    snapshotRejectsCyclicParent: cyclic.ok && cyclic.rejected.length === 2 && cyclic.snapshot.nodes.length === 0,
+    snapshotRejectsBadCrdt: !badCrdt.ok,
+    snapshotRejectsOversizedContent: oversized.ok && oversized.snapshot.contents.length === 0,
+    snapshotRebuildsNestedPaths:
+      nested.ok ? nested.snapshot.nodes.map((node) => node.path).sort() : [],
+    snapshotRejectsDuplicatePath: duplicatePath.ok ? duplicatePath.rejected.length : -1,
+    snapshotRoundTripNodes: roundTrip.ok ? roundTrip.snapshot.nodes.length : -1,
     malformedStatesRejected: rejected,
+    missingColourStillAdmitted:
+      (() => {
+        const parsed = parsePeerState({ user: { name: 'NoColour' } });
+        return parsed !== null && isValidHexColor(parsed.color);
+      })(),
     partiallyMalformedStatesDegraded: degraded,
     validStateParsed:
       parsed !== null &&

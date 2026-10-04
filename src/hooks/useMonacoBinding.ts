@@ -10,7 +10,13 @@ import type {
 } from 'monaco-editor';
 import type { WebrtcProvider } from 'y-webrtc';
 import { getFileText } from '@/services/yjsProvider';
-import { hashString } from '@/utils/colorGenerator';
+import {
+  colorFromSeed,
+  hashString,
+  isValidHexColor,
+  sanitizePeerColor,
+  sanitizePeerName,
+} from '@/utils/colorGenerator';
 import type { PeerUser } from '@/types/collaboration';
 
 /** Transaction origin for edits authored locally in Monaco. */
@@ -20,6 +26,14 @@ export const REMOTE_ORIGIN = 'yjs-remote';
 
 /** Peer labels fade out this long after the cursor stops moving. */
 export const CURSOR_LABEL_TTL_MS = 3000;
+
+/**
+ * Minimum interval between awareness broadcasts.
+ *
+ * Cursor movements are broadcast far more often than they can be perceived, so
+ * 50ms keeps remote carets smooth while capping the WebRTC data channel.
+ */
+export const PRESENCE_THROTTLE_MS = 50;
 
 const PEER_STYLE_ELEMENT_ID = 'y-peer-cursor-styles';
 const peerColorClasses = new Map<string, string>();
@@ -33,7 +47,13 @@ const peerColorClasses = new Map<string, string>();
  * colour is the cheapest correct approach.
  */
 export function getPeerColorClass(color: string): string {
-  const key = color.trim().toLowerCase();
+  /*
+   * Second line of defence behind `parsePeerState`: this value is written into
+   * a global stylesheet, so it is validated here as well rather than trusted
+   * because it "already came through the parser".
+   */
+  const safeColor = isValidHexColor(color) ? color : colorFromSeed(color);
+  const key = safeColor.toLowerCase();
   const cached = peerColorClasses.get(key);
   if (cached) return cached;
 
@@ -47,9 +67,7 @@ export function getPeerColorClass(color: string): string {
       style.id = PEER_STYLE_ELEMENT_ID;
       document.head.appendChild(style);
     }
-    style.appendChild(
-      document.createTextNode(`.${className}{--peer-color:${color};}\n`),
-    );
+    style.appendChild(document.createTextNode(`.${className}{--peer-color:${safeColor};}\n`));
   }
 
   return className;
@@ -81,7 +99,18 @@ export function parsePeerState(raw: unknown): PeerUser | null {
   if (!user || typeof user !== 'object') return null;
 
   const payload = user as Record<string, unknown>;
-  if (typeof payload.name !== 'string' || typeof payload.color !== 'string') return null;
+  if (typeof payload.name !== 'string') return null;
+
+  const clientId = typeof payload.clientId === 'number' ? payload.clientId : 0;
+  const name = sanitizePeerName(payload.name);
+  if (name.length === 0) return null;
+
+  /*
+   * The colour is sanitised rather than rejected: a peer with a bogus colour
+   * still belongs in the roster, it just gets a deterministic safe one instead
+   * of the ability to write into this document's stylesheet.
+   */
+  const color = sanitizePeerColor(payload.color, `peer-${clientId}-${name}`);
 
   const readPosition = (value: unknown): { line: number; column: number } | null => {
     if (!value || typeof value !== 'object') return null;
@@ -107,9 +136,9 @@ export function parsePeerState(raw: unknown): PeerUser | null {
   };
 
   return {
-    clientId: typeof payload.clientId === 'number' ? payload.clientId : 0,
-    name: payload.name,
-    color: payload.color,
+    clientId,
+    name,
+    color,
     cursor: readPosition(payload.cursor),
     selection: readSelection(payload.selection),
     activeFileId: typeof payload.activeFileId === 'string' ? payload.activeFileId : null,
@@ -287,7 +316,7 @@ export function useMonacoBinding({
             },
             options: {
               inlineClassName: `yRemoteSelection ${peerClass}`,
-              hoverMessage: { value: `**${peer.name}** is editing here` },
+              hoverMessage: { value: `**${sanitizePeerName(peer.name)}** is editing here` },
               stickiness: 1,
             },
           });
@@ -309,7 +338,7 @@ export function useMonacoBinding({
             options: {
               className: `yRemoteCursor ${peerClass}`,
               beforeContentClassName: `yRemoteCursor ${peerClass}${labelVisible ? ' yRemoteCursor-active' : ''}`,
-              hoverMessage: { value: `**${peer.name}**` },
+              hoverMessage: { value: `**${sanitizePeerName(peer.name)}**` },
               stickiness: 1,
             },
           });
@@ -325,13 +354,29 @@ export function useMonacoBinding({
     applyRemoteDecorations();
 
     // ── publish local cursor / selection ──────────────────────────────────────
+    /*
+     * Presence is throttled on two axes: one message per animation frame, and
+     * at most one message per PRESENCE_THROTTLE_MS. A 120–144 Hz display fires
+     * cursor events faster than any human can perceive, and an unthrottled
+     * stream saturates the WebRTC data channel and starves actual document
+     * updates on slower links.
+     */
     let publishFrame: number | null = null;
+    let publishTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastPublishedAt = 0;
     let pendingPosition: IPosition | null = null;
     let pendingSelection: ISelection | null = null;
 
     const flushPresence = (): void => {
       publishFrame = null;
+      publishTimer = null;
       if (!pendingPosition) return;
+
+      const position = pendingPosition;
+      const selection = pendingSelection;
+      lastPublishedAt = Date.now();
+      pendingPosition = null;
+      pendingSelection = null;
 
       const current = parsePeerState(provider.awareness.getLocalState());
       const payload = current ?? {
@@ -347,29 +392,39 @@ export function useMonacoBinding({
 
       provider.awareness.setLocalStateField('user', {
         ...payload,
-        cursor: { line: pendingPosition.lineNumber, column: pendingPosition.column },
-        selection: pendingSelection
+        cursor: { line: position.lineNumber, column: position.column },
+        selection: selection
           ? {
-              startLineNumber: pendingSelection.selectionStartLineNumber,
-              startColumn: pendingSelection.selectionStartColumn,
-              endLineNumber: pendingSelection.positionLineNumber,
-              endColumn: pendingSelection.positionColumn,
+              startLineNumber: selection.selectionStartLineNumber,
+              startColumn: selection.selectionStartColumn,
+              endLineNumber: selection.positionLineNumber,
+              endColumn: selection.positionColumn,
             }
           : null,
         activeFileId: fileId,
         lastActive: Date.now(),
       });
-
-      pendingPosition = null;
-      pendingSelection = null;
     };
 
-    // Cursor updates are coalesced to one awareness message per frame; sending
-    // every keystroke would saturate the WebRTC data channel.
     const schedulePresence = (position: IPosition, selection: ISelection): void => {
       pendingPosition = position;
       pendingSelection = selection;
-      if (publishFrame === null) publishFrame = requestAnimationFrame(flushPresence);
+
+      const elapsed = Date.now() - lastPublishedAt;
+      if (elapsed >= PRESENCE_THROTTLE_MS) {
+        if (publishFrame !== null) cancelAnimationFrame(publishFrame);
+        publishFrame = requestAnimationFrame(flushPresence);
+        return;
+      }
+
+      // Inside the throttle window: keep the newest position and let the timer
+      // release it, so the final caret position is never dropped.
+      if (publishTimer === null) {
+        publishTimer = setTimeout(() => {
+          publishTimer = null;
+          publishFrame = requestAnimationFrame(flushPresence);
+        }, PRESENCE_THROTTLE_MS - elapsed);
+      }
     };
 
     disposables.push(
@@ -387,6 +442,7 @@ export function useMonacoBinding({
     disposables.push({
       dispose: () => {
         if (publishFrame !== null) cancelAnimationFrame(publishFrame);
+        if (publishTimer !== null) clearTimeout(publishTimer);
       },
     });
 

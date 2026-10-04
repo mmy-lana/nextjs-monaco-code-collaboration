@@ -19,6 +19,7 @@ import {
   resolveLocalIdentity,
   saveLocalIdentity,
 } from '@/utils/colorGenerator';
+import { parsePeerState } from '@/hooks/useMonacoBinding';
 import { supportsWebRTC } from '@/utils/platform';
 
 /**
@@ -60,59 +61,6 @@ export interface UseYjsCollaborationResult {
 const MAX_LOG_ENTRIES = 500;
 
 let logSequence = 0;
-
-/** Parses an untrusted awareness payload; returns `null` for anything malformed. */
-export function parsePeerState(raw: unknown): PeerUser | null {
-  if (!raw || typeof raw !== 'object') return null;
-  const candidate = raw as Record<string, unknown>;
-  const user = candidate.user;
-  if (!user || typeof user !== 'object') return null;
-
-  const payload = user as Record<string, unknown>;
-  if (typeof payload.name !== 'string' || typeof payload.color !== 'string') return null;
-
-  const cursor =
-    payload.cursor && typeof payload.cursor === 'object'
-      ? (() => {
-          const value = payload.cursor as Record<string, unknown>;
-          return typeof value.line === 'number' && typeof value.column === 'number'
-            ? { line: value.line, column: value.column }
-            : null;
-        })()
-      : null;
-
-  const selection =
-    payload.selection && typeof payload.selection === 'object'
-      ? (() => {
-          const value = payload.selection as Record<string, unknown>;
-          const keys = [
-            'startLineNumber',
-            'startColumn',
-            'endLineNumber',
-            'endColumn',
-          ] as const;
-          return keys.every((key) => typeof value[key] === 'number')
-            ? {
-                startLineNumber: value.startLineNumber as number,
-                startColumn: value.startColumn as number,
-                endLineNumber: value.endLineNumber as number,
-                endColumn: value.endColumn as number,
-              }
-            : null;
-        })()
-      : null;
-
-  return {
-    clientId: typeof payload.clientId === 'number' ? payload.clientId : 0,
-    name: payload.name,
-    color: payload.color,
-    cursor,
-    selection,
-    activeFileId: typeof payload.activeFileId === 'string' ? payload.activeFileId : null,
-    lastActive: typeof payload.lastActive === 'number' ? payload.lastActive : Date.now(),
-    isHost: Boolean(payload.isHost),
-  };
-}
 
 /**
  * Owns the Yjs document lifecycle: WebRTC mesh, IndexedDB persistence and

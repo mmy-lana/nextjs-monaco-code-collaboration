@@ -5,6 +5,7 @@ import type * as Y from 'yjs';
 import type { WebrtcProvider } from 'y-webrtc';
 import type { editor as MonacoEditorNamespace, IDisposable } from 'monaco-editor';
 import { MonacoDynamic, MonacoLoadingFallback } from '@/components/domain/MonacoDynamic';
+import { EditorErrorBoundary } from '@/components/domain/EditorErrorBoundary';
 import { useMonacoBinding } from '@/hooks/useMonacoBinding';
 import { DEFAULT_MONACO_CONFIG, type DiagnosticItem, type MonacoEditorConfig } from '@/types/editor';
 
@@ -320,15 +321,17 @@ export function MonacoWrapper({
 
   return (
     <div className="h-full min-h-0 w-full" data-testid="monaco-wrapper" data-file-id={fileId}>
-      <MonacoDynamic
-        path={fileId}
-        language={language}
-        theme={config.theme}
-        value={value}
-        options={options}
-        onMount={handleMount}
-        loadingFallback={<MonacoLoadingFallback />}
-      />
+      <EditorErrorBoundary label="The code editor">
+        <MonacoDynamic
+          path={fileId}
+          language={language}
+          theme={config.theme}
+          value={value}
+          options={options}
+          onMount={handleMount}
+          loadingFallback={<MonacoLoadingFallback />}
+        />
+      </EditorErrorBoundary>
     </div>
   );
 }

@@ -111,14 +111,50 @@ async function runSuite({ page, browser, url, suite }) {
   suite.equal(
     'parsePeerState rejects structurally invalid awareness payloads',
     probe.malformedStatesRejected,
-    8,
+    7,
   );
   suite.equal(
-    'parsePeerState degrades partially malformed payloads instead of evicting the peer',
+    'parsePeerState degrades malformed payloads instead of evicting the peer',
     probe.partiallyMalformedStatesDegraded,
-    2,
+    3,
+  );
+  suite.ok(
+    'a peer that omits its colour is admitted with a safe deterministic colour',
+    probe.missingColourStillAdmitted,
   );
   suite.ok('parsePeerState accepts a complete peer payload', probe.validStateParsed);
+
+  // SEC-01: awareness payloads are untrusted network input.
+  suite.ok('an injected CSS payload never reaches the peer colour', probe.injectedColorSafe);
+  suite.deepEqual(
+    'parsePeerState replaces an invalid peer colour with a safe hex value',
+    probe.injectedColorSafe,
+    true,
+  );
+  suite.ok('hex colour validation rejects every non-triplet form', probe.hexValidation);
+  suite.equal(
+    'peer display names are stripped of Markdown control characters',
+    probe.injectedNameSanitized,
+    'Mallory bold',
+  );
+
+  // SEC-02: snapshot ingestion must validate before touching storage.
+  suite.ok('an unknown snapshot format is rejected', probe.snapshotRejectsUnknownFormat);
+  suite.ok('nodes from another workspace are rejected', probe.snapshotRejectsWrongWorkspace);
+  suite.ok('cyclic parent chains are rejected', probe.snapshotRejectsCyclicParent);
+  suite.ok('a malformed CRDT payload is rejected', probe.snapshotRejectsBadCrdt);
+  suite.ok('oversized content entries are rejected', probe.snapshotRejectsOversizedContent);
+  suite.deepEqual(
+    'nested paths are rebuilt from the parent graph rather than trusted',
+    probe.snapshotRebuildsNestedPaths,
+    ['/src', '/src/leaf.ts'],
+  );
+  suite.equal(
+    'duplicate paths are rejected before they poison the unique index',
+    probe.snapshotRejectsDuplicatePath,
+    1,
+  );
+  suite.equal('a well-formed snapshot round-trips through validation', probe.snapshotRoundTripNodes, 1);
   suite.deepEqual('parseSignalingServers keeps valid URLs and de-duplicates', probe.signalingValid, [
     'ws://a:4444',
     'wss://b:4444',
