@@ -5,7 +5,6 @@ import { AlertTriangle, FilePlus2, FolderPlus, Loader2, RefreshCw, Search } from
 import { ActionButton } from '@/components/primitives/ActionButton';
 import { FileTreeNode } from '@/components/molecules/FileTreeNode';
 import {
-  isVirtualDirectory,
   sortVFSNodes,
   VFS_ROOT_PATH,
   type VFSNode,

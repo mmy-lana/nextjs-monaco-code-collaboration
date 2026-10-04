@@ -409,7 +409,7 @@
   transition: opacity 200ms ease;
 }
 
-.yRemoteCursor[data-visible='true']::after {
+.yRemoteCursor.yRemoteCursor-active::after {
   opacity: 1;
 }
 

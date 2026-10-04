@@ -14,7 +14,7 @@ import {
   type WorkspaceMetadata,
 } from '@/types/workspace';
 import { detectLanguageByPath } from '@/services/languageDetector';
-import { buildNodePath, generateNodeId, getFileExtension, getParentPath, renamePath, validateNodeName } from '@/utils/pathUtils';
+import { buildNodePath, generateNodeId, getFileExtension, renamePath, validateNodeName } from '@/utils/pathUtils';
 
 /**
  * Virtual file system store.
@@ -666,14 +666,4 @@ export function useVFS(workspaceId: string): UseVFSResult {
     reconcileTabs,
     refresh,
   };
-}
-
-/** Convenience helper for the status bar: workspace-relative path of a node. */
-export function getNodeDisplayPath(node: VFSNode): string {
-  return node.path.startsWith(VFS_ROOT_PATH) ? node.path.slice(1) : node.path;
-}
-
-/** Convenience helper: does `path` sit inside the directory at `directoryPath`? */
-export function isDirectChild(directoryPath: string, path: string): boolean {
-  return getParentPath(path) === directoryPath;
 }

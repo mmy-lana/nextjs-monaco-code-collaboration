@@ -81,14 +81,15 @@ async function main() {
     } catch (error) {
       suiteFailures += 1;
       console.log(`  FAIL  suite threw: ${error?.stack ?? error}`);
+    } finally {
+      violations.pageErrors.push(...pageViolations.pageErrors);
+      violations.consoleErrors.push(...pageViolations.consoleErrors);
+      violations.failedRequests.push(...pageViolations.failedRequests);
+      totalFailures += suiteFailures;
+      // The browser and its throwaway profile must go away even when a suite
+      // throws, so no headless instance is left running.
+      await session.close();
     }
-
-    violations.pageErrors.push(...pageViolations.pageErrors);
-    violations.consoleErrors.push(...pageViolations.consoleErrors);
-    violations.failedRequests.push(...pageViolations.failedRequests);
-
-    totalFailures += suiteFailures;
-    await session.close();
   }
 
   console.log(`\n${'='.repeat(72)}\nBrowser health check\n${'='.repeat(72)}`);

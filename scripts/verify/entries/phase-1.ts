@@ -12,7 +12,6 @@ import {
   formatBytes,
   getDB,
   MAX_FILE_CHARACTERS,
-  type StoredFileContent,
 } from '@/db/schema';
 import {
   detectLanguageByFilename,

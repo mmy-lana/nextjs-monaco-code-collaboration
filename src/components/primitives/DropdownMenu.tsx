@@ -199,7 +199,7 @@ export function DropdownMenu({
         {items.length === 0 ? (
           <p className="px-3 py-2 text-xs text-vscode-description-fg">No actions available</p>
         ) : (
-          items.map((item, index) => {
+          items.map((item) => {
             const enabledIndex = enabledItems.findIndex((candidate) => candidate.id === item.id);
             return (
               <div key={item.id}>

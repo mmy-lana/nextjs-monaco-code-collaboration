@@ -55,16 +55,6 @@ export function getPeerColorClass(color: string): string {
   return className;
 }
 
-export interface CursorDecoration {
-  clientId: number;
-  line: number;
-  column: number;
-  color: string;
-  name: string;
-  /** Millisecond timestamp of the peer's last reported movement. */
-  lastActive: number;
-}
-
 export interface UseMonacoBindingOptions {
   editor: MonacoEditorNamespace.IStandaloneCodeEditor | null;
   doc: Y.Doc | null;
@@ -293,7 +283,8 @@ export function useMonacoBinding({
         if (peer.cursor) {
           const line = Math.min(Math.max(peer.cursor.line, 1), model.getLineCount());
           const column = peer.cursor.column;
-          const visible = now - peer.lastActive < CURSOR_LABEL_TTL_MS;
+          // The label fades after a few seconds of inactivity.
+          const labelVisible = now - peer.lastActive < CURSOR_LABEL_TTL_MS;
 
           decorations.push({
             range: {
@@ -304,7 +295,7 @@ export function useMonacoBinding({
             },
             options: {
               className: `yRemoteCursor ${peerClass}`,
-              beforeContentClassName: `yRemoteCursor ${peerClass}`,
+              beforeContentClassName: `yRemoteCursor ${peerClass}${labelVisible ? ' yRemoteCursor-active' : ''}`,
               hoverMessage: { value: `**${peer.name}**` },
               stickiness: 1,
             },

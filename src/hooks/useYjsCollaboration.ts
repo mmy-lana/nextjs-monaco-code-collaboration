@@ -3,11 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as Y from 'yjs';
 import type { WebrtcProvider } from 'y-webrtc';
-import {
-  createCollaborationSession,
-  getFileText,
-  type YjsCollaborationSession,
-} from '@/services/yjsProvider';
+import { createCollaborationSession, type YjsCollaborationSession } from '@/services/yjsProvider';
 import { DEFAULT_SIGNALING, isSignalingSupported } from '@/services/signalingConfig';
 import {
   type ConnectionState,
@@ -30,9 +26,6 @@ import { supportsWebRTC } from '@/utils/platform';
  * transitive dependency instead of a direct one.
  */
 export type CollaborationAwareness = WebrtcProvider['awareness'];
-
-/** Origin tag used for local transactions, so they are not echoed back. */
-export const LOCAL_ORIGIN = 'local-input';
 
 export interface UseYjsCollaborationOptions {
   roomId: string;
@@ -65,14 +58,6 @@ export interface UseYjsCollaborationResult {
 }
 
 const MAX_LOG_ENTRIES = 500;
-
-const emptyConnection = (roomId: string, signalingServers: string[]): RoomConnectionInfo => ({
-  roomId,
-  connectionState: 'offline',
-  peerCount: 1,
-  signalingServers,
-  webrtcSupported: false,
-});
 
 let logSequence = 0;
 
@@ -415,14 +400,6 @@ export function useYjsCollaboration({
     appendLog,
     clearLogs,
   };
-}
-
-/** Reads the `Y.Text` for a file, creating it on first access. */
-export function useFileText(doc: YjsCollaborationSession['doc'] | null, fileId: string | null) {
-  return useMemo(() => {
-    if (!doc || !fileId) return null;
-    return getFileText(doc, fileId);
-  }, [doc, fileId]);
 }
 
 /** Wipes the persisted identity, forcing a fresh guest name on next load. */
