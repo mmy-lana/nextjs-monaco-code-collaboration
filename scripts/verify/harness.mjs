@@ -7,7 +7,8 @@
  *    user's Zen browser) is ever opened, locked, or closed by this harness.
  *  - `browser.close()` only ever terminates the process this harness spawned.
  */
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -41,6 +42,101 @@ const EXPECTED_CONSOLE_NOISE = [
   /Download the React DevTools/i,
   /\[Report Only\]/i,
 ];
+
+/**
+ * Minimal static origin for the injected verification harnesses.
+ *
+ * Phases 1–4 mount React components into the page themselves. Doing that on the
+ * application's own document would put two copies of every component in one DOM
+ * — the harness selectors would match the live app's elements too. A separate
+ * origin keeps them isolated while still providing a real browser origin for
+ * IndexedDB, localStorage and BroadcastChannel.
+ */
+const MIME_TYPES = {
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.ttf': 'font/ttf',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+};
+
+export async function startHarnessServer(port = 4321) {
+  const staticRoot = join(PROJECT_ROOT, '.next', 'static');
+
+  // The Tailwind build emits content-hashed stylesheets; link every one of them
+  // so computed-style assertions run against the real theme.
+  const chunksDirectory = join(staticRoot, 'chunks');
+  const stylesheets = existsSync(chunksDirectory)
+    ? readdirSync(chunksDirectory)
+        .filter((name) => name.endsWith('.css'))
+        .map((name) => `<link rel="stylesheet" href="/_next/static/chunks/${name}" />`)
+        .join('')
+    : '';
+
+  const server = createServer((request, response) => {
+    const path = (request.url ?? '/').split('?')[0];
+
+    // The app's built CSS and fonts are served verbatim so the harness measures
+    // the same computed styles the product ships with.
+    if (path.startsWith('/_next/static/')) {
+      const filePath = join(staticRoot, path.replace('/_next/static/', ''));
+      if (filePath.startsWith(staticRoot) && existsSync(filePath) && statSync(filePath).isFile()) {
+        const extension = filePath.slice(filePath.lastIndexOf('.'));
+        response.writeHead(200, {
+          'Content-Type': MIME_TYPES[extension] ?? 'application/octet-stream',
+          'Cache-Control': 'no-store',
+        });
+        createReadStream(filePath).pipe(response);
+        return;
+      }
+      response.writeHead(404).end();
+      return;
+    }
+
+    if (path === '/favicon.ico') {
+      response.writeHead(204).end();
+      return;
+    }
+
+    response.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store',
+    });
+    response.end(
+      [
+        '<!doctype html><html lang="en" data-theme="dark">',
+        '<head>',
+        '<meta charset="utf-8" />',
+        // Required for mobile emulation: without it Chrome falls back to a
+        // 980px layout viewport and every breakpoint assertion would be wrong.
+        '<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />',
+        stylesheets,
+        '<title>verification harness</title>',
+        '</head>',
+        // Mirrors the application shell: outer chrome is unselectable.
+        '<body class="vscode-chrome">',
+        '</body></html>',
+      ].join(''),
+    );
+  });
+
+  await new Promise((resolveListen, rejectListen) => {
+    server.once('error', rejectListen);
+    server.listen(port, '127.0.0.1', resolveListen);
+  });
+
+  return {
+    url: `http://127.0.0.1:${port}`,
+    close: () =>
+      new Promise((resolveClose) => {
+        server.close(() => resolveClose(undefined));
+      }),
+  };
+}
 
 export function findChromeExecutable() {
   for (const candidate of CHROME_CANDIDATES) {

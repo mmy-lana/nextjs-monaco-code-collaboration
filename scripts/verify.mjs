@@ -10,7 +10,7 @@
  *
  * The browser always runs against a throwaway profile in the OS temp dir.
  */
-import { launchBrowser, reportBrowserViolations, watchPage } from './verify/harness.mjs';
+import { launchBrowser, reportBrowserViolations, startHarnessServer, watchPage } from './verify/harness.mjs';
 
 const PHASE_SUITES = {
   1: './verify/suites/phase-1.mjs',
@@ -43,51 +43,57 @@ async function main() {
     process.exit(1);
   }
 
-  const session = await launchBrowser({ headless: args.headless });
-  const violations = { pageErrors: [], consoleErrors: [], failedRequests: [] };
-  let totalFailures = 0;
-
   console.log(`\nChrome: ${process.env.CHROME_PATH ?? 'auto-detected'}`);
   console.log(`Headless: ${args.headless}`);
 
-  try {
-    for (const phase of args.phases) {
-      const suiteUrl = new URL(PHASE_SUITES[phase], import.meta.url);
-      const suiteModule = await import(suiteUrl.href);
-      const suite = suiteModule.default;
+  // Phases 1–4 inject their own React harness and therefore run on a dedicated
+  // blank origin; phase 5 drives the real application.
+  const harnessServer = await startHarnessServer();
+  console.log(`Harness origin: ${harnessServer.url}`);
 
-      const page = await session.browser.newPage();
-      await page.setViewport({ width: 1440, height: 900, deviceScaleFactor: 1 });
-      const pageViolations = watchPage(page, `phase-${phase}`);
+  // Each phase gets its own browser instance: suites seed IndexedDB, open
+  // WebRTC providers and (for phase 4) several tabs, so sharing one browser
+  // between phases would let state bleed across assertions.
+  const violations = { pageErrors: [], consoleErrors: [], failedRequests: [] };
+  let totalFailures = 0;
 
-      console.log(`\n${'='.repeat(72)}\nRunning ${suite.name}\n${'='.repeat(72)}`);
+  for (const phase of args.phases) {
+    const suiteUrl = new URL(PHASE_SUITES[phase], import.meta.url);
+    const suiteModule = await import(suiteUrl.href);
+    const suite = suiteModule.default;
 
-      let suiteFailures = 0;
-      try {
-        suiteFailures = await suite.run({
-          page,
-          browser: session.browser,
-          baseUrl: args.baseUrl,
-          headless: args.headless,
-        });
-      } catch (error) {
-        suiteFailures += 1;
-        console.log(`  FAIL  suite threw: ${error?.stack ?? error}`);
-      }
+    const session = await launchBrowser({ headless: args.headless });
+    const page = await session.browser.newPage();
+    await page.setViewport({ width: 1440, height: 900, deviceScaleFactor: 1 });
+    const pageViolations = watchPage(page, `phase-${phase}`);
 
-      violations.pageErrors.push(...pageViolations.pageErrors);
-      violations.consoleErrors.push(...pageViolations.consoleErrors);
-      violations.failedRequests.push(...pageViolations.failedRequests);
+    console.log(`\n${'='.repeat(72)}\nRunning ${suite.name}\n${'='.repeat(72)}`);
 
-      totalFailures += suiteFailures;
-      await page.close();
+    let suiteFailures = 0;
+    try {
+      suiteFailures = await suite.run({
+        page,
+        browser: session.browser,
+        baseUrl: args.baseUrl,
+        harnessUrl: harnessServer.url,
+        headless: args.headless,
+      });
+    } catch (error) {
+      suiteFailures += 1;
+      console.log(`  FAIL  suite threw: ${error?.stack ?? error}`);
     }
 
-    console.log(`\n${'='.repeat(72)}\nBrowser health check\n${'='.repeat(72)}`);
-    totalFailures += reportBrowserViolations(violations);
-  } finally {
+    violations.pageErrors.push(...pageViolations.pageErrors);
+    violations.consoleErrors.push(...pageViolations.consoleErrors);
+    violations.failedRequests.push(...pageViolations.failedRequests);
+
+    totalFailures += suiteFailures;
     await session.close();
   }
+
+  console.log(`\n${'='.repeat(72)}\nBrowser health check\n${'='.repeat(72)}`);
+  totalFailures += reportBrowserViolations(violations);
+  await harnessServer.close();
 
   if (totalFailures > 0) {
     console.log(`\nVERIFICATION FAILED — ${totalFailures} problem(s).\n`);

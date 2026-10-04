@@ -249,8 +249,11 @@ function Phase2Harness() {
 }
 
 export function mountPhase2(container: HTMLElement): void {
-  if (container.dataset.mounted === 'true') return;
-  container.dataset.mounted = 'true';
+  // The entry self-mounts when injected into a loaded document *and* the suite
+  // calls the explicit bridge; mounting twice would create two React roots on
+  // one container.
+  if (window.__phase2Root) return;
+  window.__phase2Root = true;
 
   createRoot(container).render(<Phase2Harness />);
 
@@ -282,6 +285,7 @@ declare global {
   interface Window {
     __phase2?: Phase2HarnessApi;
     __phase2Mount?: () => void;
+    __phase2Root?: boolean;
   }
 }
 

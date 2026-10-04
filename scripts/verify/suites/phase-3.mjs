@@ -11,9 +11,9 @@ import { PROJECT_ROOT, captureScreenshot, createSuite } from '../harness.mjs';
 export default {
   name: 'Phase 3 — Compound Molecules & Feature Components',
 
-  async run({ page, baseUrl }) {
+  async run({ page, baseUrl, harnessUrl }) {
     const suite = createSuite('Phase 3 feature components');
-    const url = baseUrl ?? 'http://127.0.0.1:3210';
+    const url = harnessUrl ?? baseUrl ?? 'http://127.0.0.1:4321';
 
     try {
       await runSuite({ page, url, suite });
@@ -537,6 +537,8 @@ async function runSuite({ page, url, suite }) {
       actionWidth: first ? Math.round(first.getBoundingClientRect().width) : 0,
       rowHeight: row ? Math.round(row.getBoundingClientRect().height) : 0,
       pageOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      innerWidth: window.innerWidth,
+      matchesMd: window.matchMedia('(min-width: 768px)').matches,
     };
   });
   suite.atLeast('file rows are present for the touch measurement', touchTargets.count, 1);

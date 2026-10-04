@@ -64,9 +64,9 @@ async function waitForEditor(page, timeout = 60000) {
 export default {
   name: 'Phase 4 — Domain Logic, Reactive State & Specialised APIs',
 
-  async run({ page, browser, baseUrl }) {
+  async run({ page, browser, baseUrl, harnessUrl }) {
     const suite = createSuite('Phase 4 domain logic');
-    const url = baseUrl ?? 'http://127.0.0.1:3210';
+    const url = harnessUrl ?? baseUrl ?? 'http://127.0.0.1:4321';
     ensureArtifactDir();
 
     try {

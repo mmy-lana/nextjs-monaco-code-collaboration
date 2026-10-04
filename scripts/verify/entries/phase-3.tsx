@@ -349,6 +349,13 @@ export interface Phase3Api {
 }
 
 export function mountPhase3(container: HTMLElement): void {
+  // The entry self-mounts when injected into a loaded document *and* the suite
+  // calls the explicit bridge; mounting twice would create two React roots on
+  // one container.
+  window.__phase3MountCount = (window.__phase3MountCount ?? 0) + 1;
+  if (window.__phase3Root) return;
+  window.__phase3Root = true;
+
   createRoot(container).render(<Phase3Harness />);
 
   const paths = new Map<string, string>([
@@ -389,6 +396,8 @@ declare global {
   interface Window {
     __phase3?: Phase3Api;
     __phase3Mount?: () => void;
+    __phase3Root?: boolean;
+    __phase3MountCount?: number;
   }
 }
 

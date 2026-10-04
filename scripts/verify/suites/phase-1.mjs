@@ -12,9 +12,9 @@ import { PROJECT_ROOT, captureScreenshot, createSuite, resetBrowserState } from 
 export default {
   name: 'Phase 1 — Types, Storage/API Config & Base Utilities',
 
-  async run({ page, baseUrl }) {
+  async run({ page, baseUrl, harnessUrl }) {
     const suite = createSuite('Phase 1 module behaviour');
-    const url = baseUrl ?? 'http://127.0.0.1:3210';
+    const url = harnessUrl ?? baseUrl ?? 'http://127.0.0.1:4321';
 
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await resetBrowserState(page);

@@ -59,12 +59,35 @@ const MonacoEditor = dynamic(
     // same bundle keeps the "no external network" guarantee intact. An existing
     // configuration is respected so a host (or a test harness) can supply its own.
     if (!globalScope.MonacoEnvironment) {
+      // One pre-bundled worker module per language service, exactly as Monaco
+      // expects: a single shared worker would answer JSON requests with the
+      // TypeScript service and every diagnostic would silently fail. The bundles
+      // are emitted to `public/monaco` by `scripts/build-workers.mjs` and served
+      // from this origin, so the editor keeps working with no internet access.
+      const workerFor = (label: string): { url: string; name: string } => {
+        switch (label) {
+          case 'typescript':
+          case 'javascript':
+            return { url: '/monaco/typescript.worker.js', name: 'monaco-typescript-worker' };
+          case 'json':
+            return { url: '/monaco/json.worker.js', name: 'monaco-json-worker' };
+          case 'css':
+          case 'scss':
+          case 'less':
+            return { url: '/monaco/css.worker.js', name: 'monaco-css-worker' };
+          case 'html':
+          case 'handlebars':
+          case 'razor':
+            return { url: '/monaco/html.worker.js', name: 'monaco-html-worker' };
+          default:
+            return { url: '/monaco/editor.worker.js', name: 'monaco-editor-worker' };
+        }
+      };
+
       globalScope.MonacoEnvironment = {
-        getWorker(): Worker {
-          return new Worker(
-            new URL('monaco-editor/esm/vs/editor/editor.worker.js', import.meta.url),
-            { type: 'module', name: 'monaco-editor-worker' },
-          );
+        getWorker(_moduleId: string, label: string): Worker {
+          const { url, name } = workerFor(label);
+          return new Worker(url, { type: 'module', name });
         },
       };
     }

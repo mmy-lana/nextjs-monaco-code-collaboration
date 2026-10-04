@@ -15,9 +15,9 @@ import {
 export default {
   name: 'Phase 2 — Design Foundation & Atomic UI Primitives',
 
-  async run({ page, baseUrl }) {
+  async run({ page, baseUrl, harnessUrl }) {
     const suite = createSuite('Phase 2 primitives');
-    const url = baseUrl ?? 'http://127.0.0.1:3210';
+    const url = harnessUrl ?? baseUrl ?? 'http://127.0.0.1:4321';
 
     try {
       await runSuite({ page, url, suite });

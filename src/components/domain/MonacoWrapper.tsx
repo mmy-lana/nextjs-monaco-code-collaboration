@@ -6,7 +6,7 @@ import type { WebrtcProvider } from 'y-webrtc';
 import type { editor as MonacoEditorNamespace, IDisposable } from 'monaco-editor';
 import { MonacoDynamic, MonacoLoadingFallback } from '@/components/domain/MonacoDynamic';
 import { useMonacoBinding } from '@/hooks/useMonacoBinding';
-import { DEFAULT_MONACO_CONFIG, type MonacoEditorConfig } from '@/types/editor';
+import { DEFAULT_MONACO_CONFIG, type DiagnosticItem, type MonacoEditorConfig } from '@/types/editor';
 
 /**
  * Builds Monaco options from the user-facing config object.
@@ -61,6 +61,8 @@ export interface MonacoWrapperProps {
    * route synthetic key presses into the real editor.
    */
   onEditorReady?: (editor: MonacoEditorNamespace.IStandaloneCodeEditor | null) => void;
+  /** Monaco markers (TypeScript/JSON diagnostics) for the Problems panel. */
+  onDiagnosticsChange?: (diagnostics: DiagnosticItem[]) => void;
   /** Explicit empty state — no file is open. */
   emptyState?: React.ReactNode;
 }
@@ -83,6 +85,7 @@ export function MonacoWrapper({
   onContentChange,
   onCursorChange,
   onEditorReady,
+  onDiagnosticsChange,
   emptyState,
 }: MonacoWrapperProps) {
   const [editor, setEditor] = useState<MonacoEditorNamespace.IStandaloneCodeEditor | null>(null);
@@ -90,6 +93,8 @@ export function MonacoWrapper({
   const cursorDisposableRef = useRef<IDisposable | null>(null);
   const onEditorReadyRef = useRef(onEditorReady);
   onEditorReadyRef.current = onEditorReady;
+  const onDiagnosticsRef = useRef(onDiagnosticsChange);
+  onDiagnosticsRef.current = onDiagnosticsChange;
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const onContentChangeRef = useRef(onContentChange);
   onContentChangeRef.current = onContentChange;
@@ -137,6 +142,40 @@ export function MonacoWrapper({
     },
     [],
   );
+
+  // ── diagnostics (Problems panel) ───────────────────────────────────────────
+  useEffect(() => {
+    if (!monaco || !editor || !onDiagnosticsRef.current) return undefined;
+
+    const collect = () => {
+      const model = editor.getModel();
+      const markers = model
+        ? monaco.editor.getModelMarkers({ resource: model.uri })
+        : monaco.editor.getModelMarkers({});
+
+      const severityOf = (severity: number): DiagnosticItem['severity'] =>
+        severity === 8 ? 'warning' : severity === 4 ? 'info' : 'error';
+
+      onDiagnosticsRef.current?.(
+        markers.map((marker, index) => ({
+          id: `${marker.startLineNumber}-${marker.startColumn}-${index}`,
+          fileId: fileId ?? 'active',
+          filePath,
+          message: marker.message,
+          severity: severityOf(marker.severity),
+          startLine: marker.startLineNumber,
+          startColumn: marker.startColumn,
+          endLine: marker.endLineNumber,
+          endColumn: marker.endColumn,
+          source: marker.source ?? 'monaco',
+        })),
+      );
+    };
+
+    collect();
+    const disposable = monaco.editor.onDidChangeMarkers(collect);
+    return () => disposable.dispose();
+  }, [editor, fileId, filePath, monaco]);
 
   // Publish the editor instance to the host (accessory bar, shortcuts).
   useEffect(() => {

@@ -12,6 +12,9 @@
 /.next/
 /out/
 
+# generated: bundled Monaco workers (see scripts/build-workers.mjs)
+/public/monaco
+
 # production
 /build
 
