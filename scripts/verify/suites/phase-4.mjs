@@ -508,6 +508,31 @@ async function runSuite({ page, browser, url, suite }) {
     '1',
   );
 
+  // ── NET-02: transport reporting on an offline mesh ──────────────────────────
+  // This harness runs with an empty signaling list, so no WebRTC mesh can form.
+  // The two tabs above nevertheless exchange CRDT updates over BroadcastChannel,
+  // and that must be reported as a working local mesh rather than as a failure.
+  suite.equal(
+    'with no signaling server the transport is reported as a local mesh',
+    await page.$eval('[data-testid="connection-transport"]', (el) => el.textContent),
+    'local-mesh',
+  );
+  suite.equal(
+    'both tabs agree on the local mesh transport',
+    await peer.$eval('[data-testid="connection-transport"]', (el) => el.textContent),
+    'local-mesh',
+  );
+  suite.equal(
+    'the local mesh is reflected on the root transport attribute',
+    await page.$eval('[data-testid="phase4-root"]', (el) => el.getAttribute('data-transport')),
+    'local-mesh',
+  );
+  suite.ok(
+    'the local mesh is distinguished from a peer-less connection state',
+    (await page.$eval('[data-testid="connection-state"]', (el) => el.textContent)) === 'connected',
+    await page.$eval('[data-testid="connection-state"]', (el) => el.textContent),
+  );
+
   const localName = await page.$eval('[data-testid="identity"]', (el) => el.textContent ?? '');
   const remoteNames = await peer.$eval('[data-testid="peer-names"]', (el) => el.textContent ?? '');
   suite.ok('the remote peer name is broadcast over awareness', remoteNames.includes(localName), `${remoteNames} / ${localName}`);

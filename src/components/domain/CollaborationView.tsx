@@ -5,7 +5,13 @@ import { AlertTriangle, Check, Copy, Download, Plug, Radio, RefreshCw, Users } f
 import { ActionButton } from '@/components/primitives/ActionButton';
 import { TextInput } from '@/components/primitives/TextInput';
 import { PeerAvatarGroup } from '@/components/molecules/PeerAvatarGroup';
-import { CONNECTION_STATE_LABELS, type PeerUser, type RoomConnectionInfo } from '@/types/collaboration';
+import {
+  CONNECTION_STATE_LABELS,
+  TRANSPORT_MODE_DETAILS,
+  TRANSPORT_MODE_LABELS,
+  type PeerUser,
+  type RoomConnectionInfo,
+} from '@/types/collaboration';
 
 export interface CollaborationViewProps {
   roomId: string;
@@ -67,6 +73,17 @@ export function CollaborationView({
   const [serverError, setServerError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [roomError, setRoomError] = useState<string | null>(null);
+
+  const transportMode = connection.transportMode;
+  const localMesh = transportMode === 'local-mesh';
+  /*
+   * "Open this room on another device" is only true advice when a device on
+   * another device can actually be reached. Under the local mesh it would send
+   * the user chasing a peer that no configuration of their LAN will deliver.
+   */
+  const peerHint = localMesh
+    ? 'Only tabs of this browser can join while signaling is unreachable. Start a signaling server above to invite other devices.'
+    : 'Open this room in another browser on the same LAN.';
 
   const dirtyRoom = roomDraft.trim() !== roomId;
   const parsedServers = useMemo(
@@ -136,15 +153,48 @@ export function CollaborationView({
         <span
           data-testid="connection-chip"
           data-state={connection.connectionState}
+          data-transport={transportMode}
           className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-            CONNECTION_TONE[connection.connectionState]
+            localMesh ? CONNECTION_TONE.connecting : CONNECTION_TONE[connection.connectionState]
           }`}
         >
-          {CONNECTION_STATE_LABELS[connection.connectionState]}
+          {/*
+           * "Disconnected" next to a working local mesh reads as a failure and
+           * contradicts the transport panel directly beneath it, so the chip
+           * names the transport whenever one is carrying the document.
+           */}
+          {localMesh ? TRANSPORT_MODE_LABELS['local-mesh'] : CONNECTION_STATE_LABELS[connection.connectionState]}
         </span>
       </header>
 
       <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-3 pb-4">
+        <section
+          className={`space-y-1 rounded-sm border p-2 ${
+            localMesh
+              ? 'border-vscode-warning-fg/50 bg-vscode-warning-fg/10'
+              : 'border-vscode-border bg-vscode-editor-hoverBg'
+          }`}
+          data-testid="transport-panel"
+          data-transport={transportMode}
+        >
+          <h3 className="flex items-center gap-1.5 text-xs font-medium text-vscode-fg">
+            {localMesh ? (
+              <Radio size={12} aria-hidden="true" />
+            ) : (
+              <Plug size={12} aria-hidden="true" />
+            )}
+            Transport: {TRANSPORT_MODE_LABELS[transportMode]}
+          </h3>
+          <p className="text-[11px] text-vscode-description-fg">
+            {TRANSPORT_MODE_DETAILS[transportMode]}
+          </p>
+          {!connection.broadcastChannelSupported ? (
+            <p className="text-[11px] text-vscode-error-fg" data-testid="transport-limitation">
+              This browser has no BroadcastChannel, so tabs of this browser cannot sync either.
+            </p>
+          ) : null}
+        </section>
+
         {error ? (
           <div role="alert" className="rounded-sm border border-vscode-error-fg/60 bg-vscode-error-fg/10 p-2">
             <p className="flex items-center gap-2 text-[11px] text-vscode-error-fg">
@@ -273,7 +323,7 @@ export function CollaborationView({
             </ul>
           ) : (
             <p className="text-[11px] text-vscode-description-fg" data-testid="peer-list-empty">
-              No remote peers yet. Open this room in another browser on the same LAN.
+              No remote peers yet. {peerHint}
             </p>
           )}
         </section>

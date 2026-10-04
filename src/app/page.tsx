@@ -864,6 +864,7 @@ const logOutput = useCallback((line: string) => {
           }
         }}
         connectionState={collab.connection.connectionState}
+        transportMode={collab.connection.transportMode}
         peerCount={collab.peers.length}
         language={activeFile?.language ?? null}
         cursor={cursor}

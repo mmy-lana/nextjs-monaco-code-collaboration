@@ -80,9 +80,11 @@ const FIXTURE_PEERS: PeerUser[] = [
 const FIXTURE_CONNECTION: RoomConnectionInfo = {
   roomId: 'collab-workspace-lan',
   connectionState: 'connected',
+  transportMode: 'webrtc',
   peerCount: 3,
   signalingServers: ['ws://localhost:4444'],
   webrtcSupported: true,
+  broadcastChannelSupported: true,
 };
 
 const FIXTURE_LOG: LanLogEntry[] = [

@@ -3,7 +3,13 @@
 import { memo } from 'react';
 import { Bell, GitBranch, Radio, Users, WifiOff } from 'lucide-react';
 import { Tooltip } from '@/components/primitives/Tooltip';
-import { CONNECTION_STATE_LABELS, type ConnectionState } from '@/types/collaboration';
+import {
+  CONNECTION_STATE_LABELS,
+  TRANSPORT_MODE_DETAILS,
+  TRANSPORT_MODE_LABELS,
+  type ConnectionState,
+  type TransportMode,
+} from '@/types/collaboration';
 
 export interface StatusBarItem {
   id: string;
@@ -15,6 +21,8 @@ export interface StatusBarItem {
 export interface StatusBarProps {
   isMobile: boolean;
   connectionState: ConnectionState;
+  /** Transport actually carrying the CRDT; drives the local-mesh badge. */
+  transportMode: TransportMode;
   peerCount: number;
   /** Active file language, shown when a file is open. */
   language: string | null;
@@ -32,10 +40,15 @@ export interface StatusBarProps {
  *
  * Mobile keeps only Branch / peers / language; the full metrics strip is shown
  * from `md` upwards, per the breakpoint matrix.
+ *
+ * The connection chip reports the transport, not just the peer count: a room
+ * held together by BroadcastChannel is syncing, so it must not be dressed up
+ * as the same failure as a browser that cannot reach anything.
  */
 function StatusBarComponent({
   isMobile,
   connectionState,
+  transportMode,
   peerCount,
   language,
   cursor,
@@ -47,6 +60,19 @@ function StatusBarComponent({
   items = [],
 }: StatusBarProps) {
   const connected = connectionState === 'connected';
+  const localMesh = transportMode === 'local-mesh';
+
+  const connectionLabel = connected
+    ? `${peerCount} peer${peerCount === 1 ? '' : 's'}`
+    : localMesh
+      ? TRANSPORT_MODE_LABELS['local-mesh']
+      : CONNECTION_STATE_LABELS[connectionState];
+
+  const connectionTooltip = localMesh
+    ? `${TRANSPORT_MODE_DETAILS['local-mesh']} ${peerCount} peer(s) in this browser.`
+    : connected
+      ? `${CONNECTION_STATE_LABELS[connectionState]} · ${peerCount} peer(s) in this room`
+      : `${CONNECTION_STATE_LABELS[connectionState]} · ${TRANSPORT_MODE_DETAILS[transportMode]}`;
 
   return (
     <footer
@@ -74,23 +100,21 @@ function StatusBarComponent({
         {problemsCount > 0 ? <Bell size={12} aria-hidden="true" /> : null}⊗ {problemsCount} ⚠ 0
       </button>
 
-      <Tooltip
-        content={
-          connected
-            ? `${CONNECTION_STATE_LABELS[connectionState]} · ${peerCount} peer(s) in this room`
-            : `${CONNECTION_STATE_LABELS[connectionState]} · peers sync once signaling is reachable`
-        }
-        placement="top"
-      >
+      <Tooltip content={connectionTooltip} placement="top">
         <button
           type="button"
           data-testid="status-connection"
           data-state={connectionState}
+          data-transport={transportMode}
           onClick={onOpenCollaboration}
           className="flex items-center gap-1 text-[11px] hover:underline"
         >
-          {connected ? <Radio size={12} aria-hidden="true" /> : <WifiOff size={12} aria-hidden="true" />}
-          {connected ? `${peerCount} peer${peerCount === 1 ? '' : 's'}` : CONNECTION_STATE_LABELS[connectionState]}
+          {connected || localMesh ? (
+            <Radio size={12} aria-hidden="true" />
+          ) : (
+            <WifiOff size={12} aria-hidden="true" />
+          )}
+          {connectionLabel}
         </button>
       </Tooltip>
 

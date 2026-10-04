@@ -171,6 +171,7 @@ function Phase4App() {
       data-testid="phase4-root"
       data-provider={collab.doc ? 'ready' : 'none'}
       data-connection={collab.connection.connectionState}
+      data-transport={collab.connection.transportMode}
       style={{ background: 'var(--vscode-bg)' }}
     >
       <div className="flex flex-wrap items-center gap-2 border-b border-vscode-border p-2 text-xs">
@@ -359,6 +360,12 @@ function Phase4App() {
           <dt className="text-vscode-description-fg">Connection</dt>
           <dd data-testid="connection-state" className="text-vscode-fg">
             {collab.connection.connectionState}
+          </dd>
+        </div>
+        <div>
+          <dt className="text-vscode-description-fg">Transport</dt>
+          <dd data-testid="connection-transport" className="text-vscode-fg">
+            {collab.connection.transportMode}
           </dd>
         </div>
         <div>

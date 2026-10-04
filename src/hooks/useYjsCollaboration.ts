@@ -13,6 +13,7 @@ import {
   type LocalPeerIdentity,
   type PeerUser,
   type RoomConnectionInfo,
+  type TransportMode,
 } from '@/types/collaboration';
 import {
   clearLocalIdentity,
@@ -20,7 +21,7 @@ import {
   saveLocalIdentity,
 } from '@/utils/colorGenerator';
 import { parsePeerState } from '@/hooks/useMonacoBinding';
-import { supportsWebRTC } from '@/utils/platform';
+import { supportsBroadcastChannel, supportsWebRTC } from '@/utils/platform';
 
 /**
  * Awareness instance type, derived from the provider so `y-protocols` stays a
@@ -60,6 +61,32 @@ export interface UseYjsCollaborationResult {
 
 const MAX_LOG_ENTRIES = 500;
 
+/**
+ * How often the signaling sockets are sampled.
+ *
+ * `WebsocketClient` emits `connect`/`disconnect` on its own observable, and
+ * y-webrtc never forwards those to the provider, so there is no event to
+ * subscribe to. Sampling a handful of booleans once a second is cheap and keeps
+ * the reported transport within a second of reality.
+ */
+const SIGNALING_POLL_MS = 1000;
+
+/**
+ * Whether any configured signaling server is actually reachable.
+ *
+ * `WebrtcProvider.connected` is emphatically not that signal: it is
+ * `room !== null && shouldConnect`, and the provider emits `status` exactly
+ * once — from `connect()` — with `connected: true` whether or not a single
+ * socket opened. Trusting it reported an unreachable signaling server as a
+ * healthy WebRTC mesh. The per-server connection objects carry the real socket
+ * state; `signalingConns` is public but untyped upstream.
+ */
+function isSignalingReachable(provider: WebrtcProvider): boolean {
+  return provider.signalingConns.some(
+    (connection) => (connection as { connected?: unknown }).connected === true,
+  );
+}
+
 let logSequence = 0;
 
 /**
@@ -77,6 +104,7 @@ export function useYjsCollaboration({
 }: UseYjsCollaborationOptions): UseYjsCollaborationResult {
   const [session, setSession] = useState<YjsCollaborationSession | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>('offline');
+  const [signalingConnected, setSignalingConnected] = useState(false);
   const [peers, setPeers] = useState<PeerUser[]>([]);
   const [identity, setIdentity] = useState<LocalPeerIdentity | null>(null);
   const [stats, setStats] = useState<LanMeshStats | null>(null);
@@ -150,16 +178,35 @@ export function useYjsCollaboration({
       setConnectionState(remote.length > 0 ? 'connected' : 'disconnected');
     };
 
-    const handleStatus = (event: { connected: boolean }) => {
-      if (event.connected) {
-        appendLog('success', 'signaling', 'Signaling channel established');
-        setConnectionState('connected');
-        setStats((current) => (current ? { ...current, signalingConnected: true } : current));
-      } else {
-        appendLog('warn', 'signaling', 'Signaling channel closed — falling back to BroadcastChannel');
-        setConnectionState('disconnected');
-        setStats((current) => (current ? { ...current, signalingConnected: false } : current));
-      }
+    /*
+     * Signaling reachability is sampled from the sockets themselves. A local
+     * variable guards the log so it fires once per transition rather than once
+     * per poll, keeping the comparison outside the state updater where a side
+     * effect does not belong.
+     */
+    let signalingReachable = false;
+    const syncSignaling = () => {
+      const reachable = isSignalingReachable(webrtcProvider);
+      if (reachable === signalingReachable) return;
+      signalingReachable = reachable;
+      setSignalingConnected(reachable);
+      setStats((current) => (current ? { ...current, signalingConnected: reachable } : current));
+      appendLog(
+        reachable ? 'success' : 'warn',
+        'signaling',
+        reachable
+          ? 'Signaling channel established'
+          : 'Signaling channel closed — falling back to BroadcastChannel',
+      );
+    };
+
+    const handleStatus = () => {
+      /*
+       * `status` fires from connect()/disconnect() only. Re-reading the sockets
+       * here makes the reported transport correct the moment a manual reconnect
+       * finishes, instead of up to a poll interval later.
+       */
+      syncSignaling();
     };
 
     const handlePersistence = (state: string) => {
@@ -191,13 +238,22 @@ export function useYjsCollaboration({
 
     handlePeers();
 
+    /*
+     * Sampled after the initial stats are seeded, so an already-reachable
+     * signaling server is not overwritten a tick later by the default `false`.
+     */
+    syncSignaling();
+    const signalingPoll = window.setInterval(syncSignaling, SIGNALING_POLL_MS);
+
     return () => {
+      window.clearInterval(signalingPoll);
       webrtcProvider.off('peers', handlePeers);
       webrtcProvider.off('status', handleStatus);
       webrtcProvider.awareness.off('change', handlePeers);
       created.destroy();
       setSession(null);
       setPeers([]);
+      setSignalingConnected(false);
       setConnectionState('offline');
     };
   }, [appendLog, enabled, generation, roomId]);
@@ -312,15 +368,47 @@ export function useYjsCollaboration({
     [appendLog, session],
   );
 
+  /*
+   * Transport in use, as opposed to connection state.
+   *
+   * y-webrtc always layers a BroadcastChannel underneath its WebRTC mesh: when
+   * signaling cannot be reached, the tabs of one browser still exchange CRDT
+   * updates with each other. Reporting that as "Disconnected" was actively
+   * misleading — sync was working, only the path across machines was not. The
+   * three modes keep "no peers yet" (normal), "peers only inside this browser"
+   * (local mesh) and "this browser cannot reach anything" apart.
+   */
+  const transportMode = useMemo<TransportMode>(() => {
+    if (!session) return 'unavailable';
+    if (signalingConnected) return 'webrtc';
+    return supportsBroadcastChannel() ? 'local-mesh' : 'unavailable';
+  }, [session, signalingConnected]);
+
+  // Narrate every transport change in the LAN console: this is the first place
+  // a user looks when two devices refuse to see each other.
+  useEffect(() => {
+    if (!session) return;
+    appendLog(
+      transportMode === 'webrtc' ? 'success' : 'info',
+      'webrtc',
+      `Transport: ${transportMode}`,
+      transportMode === 'local-mesh'
+        ? 'WebRTC signaling is unreachable; same-browser tabs still sync'
+        : undefined,
+    );
+  }, [appendLog, session, transportMode]);
+
   const connection = useMemo<RoomConnectionInfo>(
     () => ({
       roomId,
       connectionState,
+      transportMode,
       peerCount: peers.length + 1,
       signalingServers: serverList,
       webrtcSupported: supportsWebRTC(),
+      broadcastChannelSupported: supportsBroadcastChannel(),
     }),
-    [connectionState, peers.length, roomId, serverList],
+    [connectionState, peers.length, roomId, serverList, transportMode],
   );
 
   useEffect(() => {

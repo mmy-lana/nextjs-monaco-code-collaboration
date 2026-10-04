@@ -8,7 +8,7 @@ import { BottomPanel } from '@/components/layout/BottomPanel';
 import { StatusBar } from '@/components/layout/StatusBar';
 import { MobileKeyboardBar, type KeyboardBarCommand } from '@/components/layout/MobileKeyboardBar';
 import type { ActivityBarTab, BottomPanelTab, DiagnosticItem, EditorTab } from '@/types/editor';
-import type { ConnectionState, LanLogEntry, LanMeshStats } from '@/types/collaboration';
+import type { ConnectionState, LanLogEntry, LanMeshStats, TransportMode } from '@/types/collaboration';
 
 export interface VSCodeShellProps {
   activityTab: ActivityBarTab;
@@ -46,6 +46,7 @@ export interface VSCodeShellProps {
   onOpenDiagnostic: (diagnostic: DiagnosticItem) => void;
 
   connectionState: ConnectionState;
+  transportMode: TransportMode;
   peerCount: number;
   language: string | null;
   cursor: { line: number; column: number; selectionLength: number } | null;
@@ -104,6 +105,7 @@ export function VSCodeShell(props: VSCodeShellProps) {
     onExportLanLogs,
     onOpenDiagnostic,
     connectionState,
+    transportMode,
     peerCount,
     language,
     cursor,
@@ -192,6 +194,7 @@ export function VSCodeShell(props: VSCodeShellProps) {
       <StatusBar
         isMobile={isMobile}
         connectionState={connectionState}
+        transportMode={transportMode}
         peerCount={peerCount}
         language={language}
         cursor={cursor}

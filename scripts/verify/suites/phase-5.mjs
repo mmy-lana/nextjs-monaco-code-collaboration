@@ -391,6 +391,69 @@ async function runSuite({ page, browser, url, suite }) {
   suite.ok('a signaling server list is prefilled', collaboration.servers.includes('ws'), collaboration.servers);
   suite.ok('an empty peer roster renders an explicit empty state', collaboration.hasPeers);
 
+  // ── NET-02: offline transport reporting ─────────────────────────────────────
+  // The default signaling server is unreachable in an air-gapped run, yet the
+  // room still syncs across the tabs of this browser. That must read as a
+  // working local mesh, not as the same "Disconnected"/"Offline" failure as a
+  // browser that cannot reach anything at all.
+  const localMesh = await page
+    .waitForFunction(
+      () =>
+        document.querySelector('[data-testid="transport-panel"]')?.getAttribute('data-transport') ===
+        'local-mesh',
+      { timeout: 30000, polling: 200 },
+    )
+    .then(() => true)
+    .catch(() => false);
+  suite.ok('the collaboration panel reports the local mesh transport', localMesh);
+
+  const transportPanel = await page.evaluate(() => {
+    const panel = document.querySelector('[data-testid="transport-panel"]');
+    const status = document.querySelector('[data-testid="status-connection"]');
+    return {
+      transport: panel?.getAttribute('data-transport') ?? null,
+      panelText: (panel?.textContent ?? '').replace(/\s+/g, ' ').trim(),
+      statusTransport: status?.getAttribute('data-transport') ?? null,
+      statusText: (status?.textContent ?? '').trim(),
+      peerHint: (
+        document.querySelector('[data-testid="peer-list-empty"]')?.textContent ?? ''
+      ).trim(),
+    };
+  });
+
+  suite.equal(
+    'the transport panel is labelled for the local mesh',
+    transportPanel.transport,
+    'local-mesh',
+  );
+  suite.ok(
+    'the transport panel names BroadcastChannel as the working path',
+    transportPanel.panelText.includes('Local Mesh') &&
+      transportPanel.panelText.includes('BroadcastChannel'),
+    transportPanel.panelText.slice(0, 160),
+  );
+  suite.ok(
+    'the transport panel states that other devices cannot join',
+    transportPanel.panelText.includes('cannot join'),
+    transportPanel.panelText.slice(0, 200),
+  );
+  suite.equal(
+    'the status bar mirrors the local mesh transport',
+    transportPanel.statusTransport,
+    'local-mesh',
+  );
+  suite.equal(
+    'the status bar reads "Local Mesh" instead of a generic failure state',
+    transportPanel.statusText,
+    'Local Mesh',
+  );
+  suite.ok(
+    'the peer guidance stops suggesting another device while isolated to this browser',
+    transportPanel.peerHint.includes('signaling') &&
+      !transportPanel.peerHint.includes('another browser on the same LAN'),
+    transportPanel.peerHint,
+  );
+
   // ── settings ───────────────────────────────────────────────────────────────
   await clickElement(page, '[data-testid="activity-bar-settings"]');
   await page.waitForSelector('[data-testid="settings-view"]');

@@ -30,6 +30,19 @@ export interface PeerUser {
 
 export type ConnectionState = 'offline' | 'connecting' | 'connected' | 'disconnected';
 
+/**
+ * Which transport is actually carrying the CRDT right now.
+ *
+ * `ConnectionState` answers "are peers visible", which cannot distinguish an
+ * air-gapped browser from a perfectly healthy room that is merely keeping its
+ * peers on one machine. `local-mesh` is that healthy-but-offline case: no
+ * signaling server is reachable, so no WebRTC mesh can form across machines,
+ * but `BroadcastChannel` still carries every update between the tabs of this
+ * browser. `unavailable` is the genuinely isolated case, where neither path
+ * exists and edits stay local.
+ */
+export type TransportMode = 'webrtc' | 'local-mesh' | 'unavailable';
+
 export interface SignalingConfig {
   servers: string[];
   iceServers: RTCIceServer[];
@@ -38,9 +51,13 @@ export interface SignalingConfig {
 export interface RoomConnectionInfo {
   roomId: string;
   connectionState: ConnectionState;
+  /** Transport actually in use; see {@link TransportMode}. */
+  transportMode: TransportMode;
   peerCount: number;
   signalingServers: string[];
   webrtcSupported: boolean;
+  /** `false` means peers on other machines cannot be reached at all. */
+  broadcastChannelSupported: boolean;
 }
 
 /** Identity persisted in `localStorage` so a reload keeps the same name/colour. */
@@ -80,4 +97,23 @@ export const CONNECTION_STATE_LABELS: Record<ConnectionState, string> = {
   connecting: 'Connecting',
   connected: 'Connected',
   disconnected: 'Disconnected',
+};
+
+/**
+ * Status-bar wording, kept short enough for a 24px strip. The tooltip carries
+ * the explanation.
+ */
+export const TRANSPORT_MODE_LABELS: Record<TransportMode, string> = {
+  webrtc: 'WebRTC Mesh',
+  'local-mesh': 'Local Mesh',
+  unavailable: 'No Transport',
+};
+
+/** One line explaining what the current transport can and cannot reach. */
+export const TRANSPORT_MODE_DETAILS: Record<TransportMode, string> = {
+  webrtc: 'Signaling is up: peers can join this room from any device on the network.',
+  'local-mesh':
+    'Syncing across the tabs of this browser over BroadcastChannel. Peers on other devices cannot join until a signaling server is reachable.',
+  unavailable:
+    'No usable transport. This browser exposes neither WebRTC nor BroadcastChannel, so edits stay on this device.',
 };
