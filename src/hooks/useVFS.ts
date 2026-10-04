@@ -74,6 +74,31 @@ const createNodeBase = (workspaceId: string, parentId: string | null, name: stri
 const failure = (error: string): VFSMutationResult => ({ ok: false, error, node: null });
 
 /**
+ * Dexie surfaces a duplicate-key insert as a `ConstraintError`. It is the only
+ * failure mode `Table.add` raises that another bootstrap legitimately wins.
+ */
+const isConstraintError = (error: unknown): boolean =>
+  error instanceof Error && error.name === 'ConstraintError';
+
+/**
+ * Keeps a stored workspace's room in step with the room the caller joined.
+ *
+ * Only the two fields that actually differ are written, so a late-arriving
+ * bootstrap cannot roll back an `openFileIds` array that another tab has since
+ * populated.
+ */
+const adoptRoomId = async (
+  workspace: WorkspaceMetadata,
+  roomId: string,
+): Promise<WorkspaceMetadata> => {
+  if (workspace.roomId === roomId) return workspace;
+
+  const updated: WorkspaceMetadata = { ...workspace, roomId, updatedAt: Date.now() };
+  await getDB().workspaces.update(workspace.id, { roomId, updatedAt: updated.updatedAt });
+  return updated;
+};
+
+/**
  * Read-modify-write helper for the workspace row.
  *
  * Dexie's `Table.update` callback mutates in place and returns `void`, which
@@ -95,8 +120,16 @@ export async function updateWorkspace(
 
 /**
  * Ensures a workspace row exists, seeding one on first run.
- * Returns the workspace plus the file tree that should exist for a brand new
- * workspace, so the caller can seed starter content exactly once.
+ * Returns the workspace plus a `created` flag reporting whether this call was the
+ * one that inserted the row.
+ *
+ * The insert is raced through `add` rather than `put`. Two bootstraps can run
+ * concurrently — React StrictMode double-mounts the effect, and an HMR reload
+ * can land while the previous boot is still awaiting IndexedDB — and both can
+ * observe "no workspace". With `put`, the loser would write its pristine
+ * bootstrap record over the winner's row, silently discarding the starter tab
+ * the winner had already opened. `add` refuses the duplicate instead, so the
+ * loser re-reads the committed row and carries on from there.
  */
 export async function ensureWorkspace(
   workspaceId: string,
@@ -107,12 +140,7 @@ export async function ensureWorkspace(
   const existing = await db.workspaces.get(workspaceId);
 
   if (existing) {
-    if (existing.roomId !== roomId) {
-      const updated: WorkspaceMetadata = { ...existing, roomId, updatedAt: Date.now() };
-      await db.workspaces.put(updated);
-      return { workspace: updated, created: false };
-    }
-    return { workspace: existing, created: false };
+    return { workspace: await adoptRoomId(existing, roomId), created: false };
   }
 
   const workspace: WorkspaceMetadata = {
@@ -125,11 +153,30 @@ export async function ensureWorkspace(
     openFileIds: [],
   };
 
-  await db.workspaces.put(workspace);
-  return { workspace, created: true };
+  try {
+    await db.workspaces.add(workspace);
+    return { workspace, created: true };
+  } catch (insertError) {
+    // A concurrent bootstrap committed the row between the read and this
+    // insert. Any other failure is a genuine storage fault and must surface.
+    if (!isConstraintError(insertError)) throw insertError;
+
+    const concurrent = await db.workspaces.get(workspaceId);
+    if (!concurrent) throw insertError;
+
+    return { workspace: await adoptRoomId(concurrent, roomId), created: false };
+  }
 }
 
-/** Starter tree written the first time a workspace is opened. */
+/**
+ * Writes the starter tree and returns the id of the file that should be opened.
+ *
+ * Idempotent by design: the node ids and paths are fixed, so re-running this
+ * against a workspace whose rows were tombstoned or lost revives them rather
+ * than duplicating the tree. Tab state is deliberately not touched here — the
+ * caller reconciles it, which is the only place that knows whether the user's
+ * tab set is worth keeping.
+ */
 export async function seedStarterFiles(workspaceId: string): Promise<string> {
   const db = getDB();
   const now = Date.now();
@@ -172,7 +219,24 @@ export async function seedStarterFiles(workspaceId: string): Promise<string> {
     ),
   ];
 
-  await db.nodes.bulkPut(nodes);
+  try {
+    await db.nodes.bulkPut(nodes);
+  } catch (seedError) {
+    /*
+     * `path` carries a unique index across the whole database, so a starter
+     * path already owned by another workspace cannot be written here. That is a
+     * real, unrecoverable state for this schema rather than a transient fault,
+     * so it is reported instead of leaving the caller to decode a bare
+     * ConstraintError.
+     */
+    throw new Error(
+      isConstraintError(seedError)
+        ? 'Starter files could not be seeded: their paths are already claimed by another workspace.'
+        : `Starter files could not be seeded: ${
+            seedError instanceof Error ? seedError.message : String(seedError)
+          }`,
+    );
+  }
 
   const contents = [
     {
@@ -222,26 +286,31 @@ export async function seedStarterFiles(workspaceId: string): Promise<string> {
     })),
   );
 
-  await db.workspaces.update(workspaceId, {
-    activeFileId: 'file-welcome',
-    openFileIds: ['file-welcome'],
-    updatedAt: now,
-  });
-
   return 'file-welcome';
 }
 
 /**
  * Drops open tabs that point at nodes which no longer exist (deleted locally,
  * or removed by a peer). Called after every structural mutation and on load.
+ *
+ * When `fallbackFileId` names a live node and the reconciliation leaves the tab
+ * strip empty, that file is opened. A workspace with files on disk but nothing
+ * open is otherwise stranded: no tab, no active file, an editor bound to
+ * nothing. The fallback is ignored unless it is a live file, so deliberately
+ * closing every tab in a populated workspace is never undone.
  */
 export async function reconcileWorkspaceTabs(
   workspace: WorkspaceMetadata,
   liveNodes: readonly VFSNode[],
+  fallbackFileId: string | null = null,
 ): Promise<{ workspace: WorkspaceMetadata; changed: boolean }> {
   const liveIds = new Set(liveNodes.filter((node) => node.deletedAt === null).map((node) => node.id));
 
-  const openFileIds = workspace.openFileIds.filter((id) => liveIds.has(id));
+  let openFileIds = workspace.openFileIds.filter((id) => liveIds.has(id));
+  if (openFileIds.length === 0 && fallbackFileId !== null && liveIds.has(fallbackFileId)) {
+    openFileIds = [fallbackFileId];
+  }
+
   const activeFileId =
     workspace.activeFileId && liveIds.has(workspace.activeFileId)
       ? workspace.activeFileId
@@ -290,18 +359,32 @@ export function useVFS(workspaceId: string): UseVFSResult {
     const bootstrap = async () => {
       setLoading(true);
       try {
-        const { workspace: ensured, created } = await ensureWorkspace(workspaceId);
+        const { workspace: ensured } = await ensureWorkspace(workspaceId);
         let live = await loadNodes();
 
-        if (live.length === 0 && created) {
-          await seedStarterFiles(workspaceId);
+        /*
+         * The starter tree is a function of the *tree*, not of whether this
+         * particular call created the workspace row. Gating it on the creation
+         * flag stranded the workspace permanently whenever the two were
+         * separated by a reload: a fresh origin (a second loopback address, a
+         * LAN IP) has its own IndexedDB partition, and an interrupted first
+         * load — a closed tab mid-seed, an HMR reload — commits the workspace
+         * row before the nodes. Either way the next load found `created ===
+         * false` next to an empty tree and never seeded again, leaving no nodes,
+         * no tab and an editor bound to nothing. Emptiness is the only signal
+         * that actually needs recovering from.
+         */
+        let starterFileId: string | null = null;
+        if (live.length === 0) {
+          starterFileId = await seedStarterFiles(workspaceId);
           live = await loadNodes();
         }
 
-        // Re-read: seeding writes the initial tab set, so the object captured
-        // before the seed no longer reflects what is on disk.
+        // Re-read: seeding and the concurrent-bootstrap race both write the
+        // workspace row, so the object captured before them no longer reflects
+        // what is on disk.
         const current = (await getDB().workspaces.get(workspaceId)) ?? ensured;
-        const reconciled = await reconcileWorkspaceTabs(current, live);
+        const reconciled = await reconcileWorkspaceTabs(current, live, starterFileId);
 
         if (!mountedRef.current) return;
         setWorkspace(reconciled.workspace);
@@ -693,7 +776,10 @@ export function useVFS(workspaceId: string): UseVFSResult {
     const current = await getDB().workspaces.get(workspaceId);
     if (!current) return;
     const live = await loadNodes();
-    const reconciled = await reconcileWorkspaceTabs(current, live);
+    // An imported snapshot can land with files but no tabs; open the first one
+    // so the editor is never left bound to nothing.
+    const fallbackFileId = sortVFSNodes(live).find(isVirtualFile)?.id ?? null;
+    const reconciled = await reconcileWorkspaceTabs(current, live, fallbackFileId);
     if (mountedRef.current) setWorkspace(reconciled.workspace);
   }, [loadNodes, workspaceId]);
 

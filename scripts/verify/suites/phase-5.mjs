@@ -2,6 +2,7 @@ import {
   captureScreenshot,
   clickElement,
   createSuite,
+  resetBrowserState,
   waitForAppShell,
 } from '../harness.mjs';
 
@@ -27,12 +28,12 @@ const text = (page, testId) =>
 export default {
   name: 'Phase 5 — Page Assembly & Responsive Shell',
 
-  async run({ page, baseUrl }) {
+  async run({ page, browser, baseUrl }) {
     const suite = createSuite('Phase 5 shell');
     const url = baseUrl ?? 'http://127.0.0.1:3210';
 
     try {
-      await runSuite({ page, url, suite });
+      await runSuite({ page, browser, url, suite });
     } catch (error) {
       suite.fail('suite ran to completion', error?.stack ?? String(error));
     }
@@ -40,7 +41,7 @@ export default {
   },
 };
 
-async function runSuite({ page, url, suite }) {
+async function runSuite({ page, browser, url, suite }) {
   await page.setViewport(VIEWPORTS.desktop);
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await waitForAppShell(page);
@@ -689,4 +690,88 @@ async function runSuite({ page, url, suite }) {
     { timeout: 20000 },
   );
   suite.ok('the shell returns to the desktop layout after mobile', true);
+
+  // ── DATA-04 / NET-01: first run on a second origin ──────────────────────────
+  // Every distinct host is a separate IndexedDB partition and a separate HMR
+  // socket, so booting on a second loopback address reproduces a brand new
+  // browser profile end to end: the workspace row is created, the starter tree
+  // is seeded, and the editor must open on real content rather than an empty
+  // buffer. It also proves the server answers off `127.0.0.1`, which is what
+  // `next dev -H 0.0.0.0` is there to guarantee.
+  const base = new URL(url);
+  const isLoopback = /^(localhost|127\.)/.test(base.hostname);
+  const alternate = new URL(url);
+  // `localhost` resolves to 127.0.0.1 only, so a second alias is the only way
+  // to exercise the off-default-host path from a loopback base URL.
+  alternate.hostname =
+    isLoopback && base.hostname !== '127.0.2.2' ? '127.0.2.2' : base.hostname;
+  const alternateUrl = alternate.href;
+
+  const alternatePage = await browser.newPage();
+  try {
+    await alternatePage.setViewport({ width: 1440, height: 900, deviceScaleFactor: 1 });
+    await alternatePage.goto(alternateUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+
+    if (!isLoopback) {
+      // No second loopback alias to hand; wipe the partition instead so the
+      // assertions below still run against a first-run workspace.
+      await resetBrowserState(alternatePage);
+      await alternatePage.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+    }
+
+    await alternatePage.waitForSelector('[data-testid="vscode-shell"]', { timeout: 60000 });
+    await alternatePage.waitForSelector('[data-testid^="editor-tab-"]', { timeout: 60000 });
+    // The body is hydrated from IndexedDB into the Monaco model after the tab
+    // exists, so an empty view-lines at this point is a race, not a defect.
+    await alternatePage.waitForFunction(
+      () => {
+        const lines = document.querySelector('.monaco-editor .view-lines');
+        return ((lines?.textContent ?? '').replace(/\s+/g, ' ').trim().length ?? 0) > 0;
+      },
+      { timeout: 30000, polling: 200 },
+    );
+
+    const alternateBoot = await alternatePage.evaluate(async () => {
+      const db = await new Promise((resolve, reject) => {
+        const request = indexedDB.open('LANCodeCollab-meta');
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      const nodes = await new Promise((resolve, reject) => {
+        const request = db.transaction('nodes', 'readonly').objectStore('nodes').getAll();
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      db.close();
+
+      const lines = document.querySelector('.monaco-editor .view-lines');
+      return {
+        tabs: document.querySelectorAll('[data-testid^="editor-tab-"][role="tab"]').length,
+        paths: nodes.filter((node) => node.deletedAt === null).map((node) => node.path),
+        breadcrumb: document.querySelector('[data-testid="breadcrumb-bar"]')?.textContent ?? '',
+        editorText: (lines?.textContent ?? '').replace(/\s+/g, ' ').trim(),
+        shell: Boolean(document.querySelector('[data-testid="vscode-shell"]')),
+      };
+    });
+
+    suite.equal(`a first run on ${alternateUrl} renders the shell`, alternateBoot.shell, true);
+    suite.atLeast('the alternate origin opens a seeded file tab', alternateBoot.tabs, 1);
+    suite.ok(
+      'the alternate origin seeds the starter tree',
+      alternateBoot.paths.includes('/src/welcome.ts') && alternateBoot.paths.includes('/README.md'),
+      JSON.stringify(alternateBoot.paths),
+    );
+    suite.ok(
+      'the alternate origin selects the starter file',
+      alternateBoot.breadcrumb.includes('welcome.ts'),
+      alternateBoot.breadcrumb,
+    );
+    suite.ok(
+      'the alternate origin renders real starter content, not an empty buffer',
+      alternateBoot.editorText.includes('Starter file'),
+      alternateBoot.editorText.slice(0, 120),
+    );
+  } finally {
+    await alternatePage.close();
+  }
 }

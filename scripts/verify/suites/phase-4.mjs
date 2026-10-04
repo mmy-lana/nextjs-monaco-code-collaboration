@@ -61,6 +61,43 @@ async function waitForEditor(page, timeout = 60000) {
   await page.waitForFunction(() => typeof window.__phase4Editor?.get() === 'object', { timeout });
 }
 
+/**
+ * Tears the React root down and mounts a fresh one, which re-runs the VFS
+ * bootstrap exactly as a real page reload would.
+ *
+ * The mount guard in the entry module (`if (window.__phase4Root) return`) has to
+ * be released explicitly, otherwise the re-mounted tree would be skipped. The
+ * bundle itself is deliberately *not* re-injected: a second evaluation would
+ * load a second copy of Yjs into the same document, which trips its
+ * "already imported" constructor check and is a harness artefact, not an
+ * application fault.
+ */
+async function remountHarness(page) {
+  await page.evaluate(() => {
+    window.__phase4Root?.unmount();
+    delete window.__phase4Root;
+  });
+  await page.evaluate(() => window.__phase4Mount?.());
+  await page.waitForSelector('[data-testid="phase4-root"]', { timeout: 30000 });
+}
+
+/**
+ * Waits for the editor without throwing.
+ *
+ * A stranded workspace produces a perfectly valid shell with no editor at all,
+ * so a hard timeout here would abort the suite on the very regression this block
+ * exists to name. The callers assert on `ready` instead.
+ */
+async function editorIsReady(page, timeout = 30000) {
+  return page
+    .waitForFunction(() => typeof window.__phase4Editor?.get() === 'object', {
+      timeout,
+      polling: 200,
+    })
+    .then(() => true)
+    .catch(() => false);
+}
+
 export default {
   name: 'Phase 4 — Domain Logic, Reactive State & Specialised APIs',
 
@@ -636,4 +673,153 @@ async function runSuite({ page, browser, url, suite }) {
   );
 
   await peer.close();
+
+  // ── DATA-04: recovery from a stranded workspace ─────────────────────────────
+  // An interrupted first load (the tab closed mid-seed, an HMR reload landed) or
+  // a fresh origin (a second loopback address, a LAN IP — each has its own
+  // IndexedDB partition) commits the workspace row before the starter tree.
+  // Gating seeding on "did this call create the workspace" left that partition
+  // permanently empty: no nodes, no tab, no active file, an editor bound to
+  // nothing. Emptiness of the tree is the only signal that needs recovering.
+  const strandState = await page.evaluate(async (workspaceId) => {
+    const openDb = (name) =>
+      new Promise((resolve, reject) => {
+        const request = indexedDB.open(name);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+
+    const db = await openDb('LANCodeCollab-meta');
+    const readAll = (store) =>
+      new Promise((resolve, reject) => {
+        const request = db.transaction(store, 'readonly').objectStore(store).getAll();
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+
+    const nodesBefore = await readAll('nodes');
+    const workspaces = await readAll('workspaces');
+    const workspace = workspaces.find((entry) => entry.id === workspaceId);
+
+    // Reproduce the interrupted load exactly: the workspace row survives, the
+    // tree does not, and the initial tab set was never written.
+    await new Promise((resolve, reject) => {
+      const transaction = db.transaction(['nodes', 'workspaces'], 'readwrite');
+      transaction.objectStore('nodes').clear();
+      transaction.objectStore('workspaces').put({
+        ...workspace,
+        activeFileId: null,
+        openFileIds: [],
+        updatedAt: Date.now(),
+      });
+      transaction.oncomplete = () => resolve(undefined);
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+
+    const nodesAfter = await readAll('nodes');
+    const strandedRows = await readAll('workspaces');
+    db.close();
+
+    const strandedRow = strandedRows.find((entry) => entry.id === workspaceId);
+
+    return {
+      nodesBefore: nodesBefore.length,
+      nodesAfter: nodesAfter.length,
+      workspaceSurvived: Boolean(workspace),
+      // Read back after the write, so this reports the state the next bootstrap
+      // will actually observe rather than the one that was just replaced.
+      strandedTabs: strandedRow?.openFileIds ?? null,
+      strandedActive: strandedRow?.activeFileId ?? null,
+    };
+  }, WORKSPACE_ID);
+
+  suite.ok(
+    'the interrupted-load fixture leaves the workspace row intact',
+    strandState.workspaceSurvived,
+    JSON.stringify(strandState),
+  );
+  suite.atLeast('the fixture starts from a populated tree', strandState.nodesBefore, 3);
+  suite.equal('the fixture empties only the node table', strandState.nodesAfter, 0);
+  suite.deepEqual('the fixture strands the workspace with no open tabs', strandState.strandedTabs, []);
+  suite.equal(
+    'the fixture strands the workspace with no active file',
+    strandState.strandedActive,
+    null,
+  );
+
+  await remountHarness(page);
+  const recoveredEditorReady = await editorIsReady(page);
+
+  const recovered = await page.evaluate(() => ({
+    paths: document.querySelector('[data-testid="vfs-paths"]')?.textContent ?? '',
+    active: document.querySelector('[data-testid="vfs-active"]')?.textContent ?? '',
+    openIds: document.querySelector('[data-testid="vfs-open-ids"]')?.textContent ?? '',
+    error: document.querySelector('[data-testid="vfs-load-error"]')?.textContent ?? '',
+  }));
+
+  suite.ok(
+    'a stranded workspace is re-seeded with the starter tree',
+    recovered.paths.includes('/src/welcome.ts') && recovered.paths.includes('/README.md'),
+    recovered.paths,
+  );
+  suite.equal(
+    'the re-seeded starter file becomes the active tab',
+    recovered.active,
+    'file-welcome',
+  );
+  suite.equal(
+    'the re-seeded starter file is registered as an open tab',
+    recovered.openIds,
+    'file-welcome',
+  );
+  suite.equal('the recovery reports no load error', recovered.error, '');
+  suite.ok(
+    'the stranded workspace binds an editor instead of leaving it unbound',
+    recoveredEditorReady,
+    'no editor was mounted after the workspace was re-seeded',
+  );
+  suite.ok(
+    'the re-seeded file has its starter body again',
+    recoveredEditorReady &&
+      (await page.evaluate(() => window.__phase4Editor.getText() ?? '')).includes(
+        'CollaborationSession',
+      ),
+  );
+
+  const seededRows = await page.evaluate(async () => {
+    const db = await new Promise((resolve, reject) => {
+      const request = indexedDB.open('LANCodeCollab-meta');
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const nodes = await new Promise((resolve, reject) => {
+      const request = db.transaction('nodes', 'readonly').objectStore('nodes').getAll();
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    db.close();
+    const wanted = new Set(['/src', '/src/welcome.ts', '/README.md']);
+    const matched = nodes.filter((node) => wanted.has(node.path));
+    return {
+      count: nodes.length,
+      liveStarterRows: matched.filter((node) => node.deletedAt === null).length,
+    };
+  });
+  suite.equal('the re-seed writes exactly the starter tree', seededRows.count, 3);
+  suite.equal('every re-seeded row is live, not tombstoned', seededRows.liveStarterRows, 3);
+
+  // A populated workspace must never be re-seeded: that would roll back the
+  // file bodies the user has been editing.
+  await remountHarness(page);
+  const secondBootReady = await editorIsReady(page);
+  const secondBoot = await page.evaluate(() => ({
+    paths: document.querySelector('[data-testid="vfs-paths"]')?.textContent ?? '',
+    active: document.querySelector('[data-testid="vfs-active"]')?.textContent ?? '',
+    error: document.querySelector('[data-testid="vfs-load-error"]')?.textContent ?? '',
+  }));
+  suite.equal('a populated workspace is not seeded a second time', secondBoot.paths, recovered.paths);
+  suite.equal('the recovered tab set survives the next bootstrap', secondBoot.active, 'file-welcome');
+  suite.equal('the repeated bootstrap reports no load error', secondBoot.error, '');
+  suite.ok('the editor is still bound after the repeated bootstrap', secondBootReady);
 }
