@@ -267,6 +267,111 @@ async function runSuite({ page, url, suite }) {
     suite.ok(`the activity bar opens the ${tab} view`, true);
   }
 
+  // ── non-blocking dialogs (SEC-03) ──────────────────────────────────────────
+  // window.prompt/confirm would stall the render loop and the WebRTC keep-alive
+  // timers; these flows must go through ModalOverlay instead.
+  suite.equal('no blocking create dialog is opened on load', await page.$('[data-testid="workspace-dialog"]'), null);
+
+  await clickElement(page, '[data-testid="explorer-new-file"]');
+  await page.waitForSelector('[data-testid="workspace-dialog"]', { timeout: 10000 });
+
+  const createDialog = await page.evaluate(() => ({
+    title: document.querySelector('[data-testid="workspace-dialog"] h2')?.textContent ?? null,
+    role: document.querySelector('[data-testid="workspace-dialog"]')?.getAttribute('role'),
+    ariaModal: document.querySelector('[data-testid="workspace-dialog"]')?.getAttribute('aria-modal'),
+    focused: document.activeElement?.getAttribute('data-testid'),
+    confirmDisabled: document.querySelector('[data-testid="workspace-dialog-confirm"]')?.disabled ?? null,
+  }));
+  suite.equal('create flow opens a modal dialog instead of window.prompt', createDialog.role, 'dialog');
+  suite.equal('the dialog is aria-modal', createDialog.ariaModal, 'true');
+  suite.ok('the dialog is titled for the action', (createDialog.title ?? '').includes('file'), String(createDialog.title));
+  suite.equal('the dialog focuses its name field', createDialog.focused, 'workspace-dialog-name');
+  suite.equal(
+    'the dialog pre-fills a sensible default name',
+    await page.$eval('[data-testid="workspace-dialog-name"]', (el) => el.value),
+    'untitled.ts',
+  );
+
+  await page.evaluate(() => {
+    const input = document.querySelector('[data-testid="workspace-dialog-name"]');
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    setter.call(input, '');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  suite.equal(
+    'an empty name cannot be submitted',
+    await page.$eval('[data-testid="workspace-dialog-confirm"]', (el) => el.disabled),
+    true,
+  );
+
+  await page.evaluate(() => {
+    const input = document.querySelector('[data-testid="workspace-dialog-name"]');
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    setter.call(input, 'verified.ts');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  const beforeCreate = await page.$$eval('[data-testid^="editor-tab-"][role="tab"]', (nodes) => nodes.length);
+  await clickElement(page, '[data-testid="workspace-dialog-confirm"]');
+  await page.waitForFunction(() => !document.querySelector('[data-testid="workspace-dialog"]'), { timeout: 10000 });
+  const createdTab = await page
+    .waitForFunction(
+      (before) => document.querySelectorAll('[data-testid^="editor-tab-"][role="tab"]').length > before,
+      { timeout: 15000 },
+      beforeCreate,
+    )
+    .then(() => true)
+    .catch(() => false);
+  suite.ok('confirming the dialog creates and opens the file', createdTab);
+
+  await clickElement(page, '[data-testid="explorer-new-folder"]');
+  await page.waitForSelector('[data-testid="workspace-dialog"]', { timeout: 10000 });
+  await page.evaluate(() => {
+    const input = document.querySelector('[data-testid="workspace-dialog-name"]');
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    setter.call(input, 'bad/name');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  const invalidName = await page.evaluate(() => ({
+    disabled: document.querySelector('[data-testid="workspace-dialog-confirm"]')?.disabled ?? null,
+    alert: document.querySelector('[data-testid="workspace-dialog"] [role="alert"]')?.textContent ?? null,
+  }));
+  suite.equal('an invalid name cannot be submitted', invalidName.disabled, true);
+  suite.ok('the dialog explains why the name is invalid', Boolean(invalidName.alert), String(invalidName.alert));
+
+  await clickElement(page, '[data-testid="workspace-dialog-cancel"]');
+  await page.waitForFunction(() => !document.querySelector('[data-testid="workspace-dialog"]'), { timeout: 10000 });
+  suite.ok('the dialog can be dismissed without side effects', true);
+
+  // Delete confirmation replaces window.confirm.
+  const createdNodeId = await page.evaluate(() => {
+    const row = document.querySelector('[data-node-path="/verified.ts"]');
+    return row?.getAttribute('data-testid')?.replace('file-tree-row-', '') ?? null;
+  });
+  suite.ok('the created file appears in the explorer tree', createdNodeId !== null);
+
+  await clickElement(page, `[data-testid="file-tree-more-${createdNodeId}"]`);
+  await page.waitForSelector(`[data-testid="file-tree-menu-${createdNodeId}-menu"]`, { timeout: 10000 });
+  await clickElement(page, `[data-testid="file-tree-menu-${createdNodeId}-item-delete"]`);
+  await page.waitForSelector('[data-testid="workspace-dialog"]', { timeout: 10000 });
+  const deleteDialog = await page.evaluate(() => ({
+    title: document.querySelector('[data-testid="workspace-dialog"] h2')?.textContent ?? null,
+    hasNameInput: Boolean(document.querySelector('[data-testid="workspace-dialog-name"]')),
+    confirmLabel: document.querySelector('[data-testid="workspace-dialog-confirm"]')?.textContent ?? null,
+  }));
+  suite.ok('delete asks for confirmation through a modal', (deleteDialog.title ?? '').includes('Delete'), String(deleteDialog.title));
+  suite.equal('the delete dialog has no name field', deleteDialog.hasNameInput, false);
+  suite.equal('the delete action is labelled explicitly', deleteDialog.confirmLabel, 'Delete');
+
+  await clickElement(page, '[data-testid="workspace-dialog-confirm"]');
+  await page.waitForFunction(
+    () => !(document.querySelector('[data-node-path="/verified.ts"]')),
+    { timeout: 15000 },
+  );
+  suite.ok('confirming the delete removes the node from the tree', true);
+
   // ── collaboration panel ─────────────────────────────────────────────────────
   await clickElement(page, '[data-testid="activity-bar-collaboration"]');
   await page.waitForSelector('[data-testid="collaboration-view"]');
@@ -502,20 +607,52 @@ async function runSuite({ page, url, suite }) {
       );
       suite.atLeast('file action triggers meet the 44px touch target', Math.min(...treeTargets, 44), 44);
 
-      const accessoryBar = await page.evaluate(() => {
-        const bar = document.querySelector('[data-testid="mobile-keyboard-bar"]');
-        if (!bar) return null;
-        const rect = bar.getBoundingClientRect();
-        return {
-          height: Math.round(rect.height),
-          overflowX: getComputedStyle(bar).overflowX,
-          buttons: bar.querySelectorAll('button').length,
-        };
-      });
-      suite.ok('the mobile accessory bar engages', accessoryBar !== null);
-      suite.atLeast('the accessory bar keeps its tray height', accessoryBar?.height ?? 0, 38);
-      suite.equal('the accessory bar scrolls horizontally', accessoryBar?.overflowX, 'auto');
-      suite.atLeast('the accessory bar exposes the full quick-input set', accessoryBar?.buttons ?? 0, 12);
+      // UI-01: the tray and the bottom navigation are mutually exclusive. With
+      // both rendered the editor is squeezed below a usable height, so focusing
+      // the caret must yield the navigation and vice versa.
+      const chromeState = () =>
+        page.evaluate(() => {
+          const bar = document.querySelector('[data-testid="mobile-keyboard-bar"]');
+          const nav = document.querySelector('[data-testid="activity-bar"][data-layout="bottom"]');
+          const surface = document.querySelector('[data-testid="editor-surface"]');
+          return {
+            bar: Boolean(bar),
+            nav: Boolean(nav),
+            barHeight: bar ? Math.round(bar.getBoundingClientRect().height) : 0,
+            overflowX: bar ? getComputedStyle(bar).overflowX : null,
+            buttons: bar?.querySelectorAll('button').length ?? 0,
+            editorHeight: Math.round(surface?.getBoundingClientRect().height ?? 0),
+          };
+        });
+
+      const idleChrome = await chromeState();
+      suite.equal('the accessory tray stays hidden until the caret is in the editor', idleChrome.bar, false);
+      suite.ok('the bottom navigation is present while the tray is hidden', idleChrome.nav);
+
+      await page.evaluate(() => document.querySelector('.monaco-editor textarea')?.focus());
+      await page.waitForSelector('[data-testid="mobile-keyboard-bar"]', { timeout: 10000 });
+      const focusedChrome = await chromeState();
+      suite.ok('focusing the editor engages the accessory bar', focusedChrome.bar);
+      suite.ok('the bottom navigation yields to the accessory bar', !focusedChrome.nav);
+      suite.atLeast('the accessory bar keeps its tray height', focusedChrome.barHeight, 38);
+      suite.equal('the accessory bar scrolls horizontally', focusedChrome.overflowX, 'auto');
+      suite.atLeast('the accessory bar exposes the full quick-input set', focusedChrome.buttons, 12);
+      suite.atLeast(
+        'the editor stays usable while the tray is open',
+        focusedChrome.editorHeight,
+        120,
+      );
+
+      await page.evaluate(() =>
+        document.activeElement instanceof HTMLElement ? document.activeElement.blur() : undefined,
+      );
+      await page.waitForFunction(
+        () => !document.querySelector('[data-testid="mobile-keyboard-bar"]'),
+        { timeout: 10000 },
+      );
+      const blurredChrome = await chromeState();
+      suite.ok('leaving the editor restores the bottom navigation', blurredChrome.nav);
+      suite.ok('the tray and the navigation are never rendered together', !focusedChrome.bar === focusedChrome.nav);
 
       await captureScreenshot(page, 'phase-5-mobile-390');
 

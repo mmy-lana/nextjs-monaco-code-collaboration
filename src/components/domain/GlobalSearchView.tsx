@@ -6,6 +6,8 @@ import { getDB, type StoredFileContent } from '@/db/schema';
 import type { SearchMatch } from '@/types/editor';
 
 export interface GlobalSearchViewProps {
+  /** Workspace whose files are scanned; bounds the node lookup. */
+  workspaceId?: string;
   /** Pre-computed matches supplied by the host (used by tests and snapshot mode). */
   injectedResults?: readonly SearchMatch[];
   /** Matches per file cap, applied to both injected and queried results. */
@@ -17,6 +19,16 @@ export interface GlobalSearchViewProps {
 
 const DEBOUNCE_MS = 200;
 const DEFAULT_MAX_PER_FILE = 50;
+
+/**
+ * Upper bounds for a single scan.
+ *
+ * Without them a large workspace materialises every stored file — and a single
+ * oversized paste can be half a megabyte of characters — into one synchronous
+ * scan on the main thread, which locks the UI for the length of the query.
+ */
+export const MAX_SEARCH_FILES = 2000;
+export const MAX_SEARCH_CHARACTERS = 5_000_000;
 
 /**
  * Case-insensitive line scan shared by the live query and the exported helper.
@@ -67,6 +79,7 @@ export function searchContents(
 export function GlobalSearchView({
   injectedResults,
   maxMatchesPerFile = DEFAULT_MAX_PER_FILE,
+  workspaceId = 'default-workspace',
   onOpenMatch,
   error = null,
 }: GlobalSearchViewProps) {
@@ -74,6 +87,7 @@ export function GlobalSearchView({
   const [results, setResults] = useState<SearchMatch[]>([]);
   const [searching, setSearching] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
+  const [scanTruncated, setScanTruncated] = useState(false);
   const sequenceRef = useRef(0);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -106,14 +120,41 @@ export function GlobalSearchView({
 
       try {
         const db = getDB();
-        const contents = await db.contents.toArray();
-        const nodes = await db.nodes.toArray();
+
+        /*
+         * Bounded read: only as many content rows as the scan budget allows are
+         * pulled out of IndexedDB, and each one is length-capped before it
+         * reaches the matcher.
+         */
+        const contents = await db.contents.limit(MAX_SEARCH_FILES).toArray();
+        const nodes = await db.nodes.where('workspaceId').equals(workspaceId).toArray();
+
         const filePaths = new Map<string, string>();
         for (const node of nodes) {
           if (node.type === 'file') filePaths.set(node.id, node.path);
         }
 
-        const matches = searchContents(needle, contents, filePaths, maxMatchesPerFile);
+        let scannedCharacters = 0;
+        let truncated = false;
+        const scannable: Pick<StoredFileContent, 'contentId' | 'plainText'>[] = [];
+
+        for (const content of contents) {
+          if (scannedCharacters >= MAX_SEARCH_CHARACTERS) {
+            truncated = true;
+            break;
+          }
+          const remaining = MAX_SEARCH_CHARACTERS - scannedCharacters;
+          const text =
+            content.plainText.length > remaining
+              ? content.plainText.slice(0, remaining)
+              : content.plainText;
+
+          scannedCharacters += text.length;
+          scannable.push({ contentId: content.contentId, plainText: text });
+        }
+
+        const matches = searchContents(needle, scannable, filePaths, maxMatchesPerFile);
+        setScanTruncated(truncated || contents.length >= MAX_SEARCH_FILES);
 
         // Discard results from a superseded keystroke.
         if (sequenceRef.current !== sequence) return;
@@ -128,7 +169,7 @@ export function GlobalSearchView({
         if (sequenceRef.current === sequence) setSearching(false);
       }
     },
-    [injectedResults, maxMatchesPerFile],
+    [injectedResults, maxMatchesPerFile, workspaceId],
   );
 
   const handleQueryChange = useCallback(
@@ -153,7 +194,7 @@ export function GlobalSearchView({
   }, [results]);
 
   const totalMatches = results.length;
-  const truncated = results.length >= DEFAULT_MAX_PER_FILE;
+  const truncated = results.length >= DEFAULT_MAX_PER_FILE || scanTruncated;
 
   return (
     <div className="flex h-full min-h-0 flex-col" data-testid="global-search-view">

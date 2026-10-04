@@ -10,12 +10,15 @@ import { GlobalSearchView } from '@/components/domain/GlobalSearchView';
 import { CollaborationView } from '@/components/domain/CollaborationView';
 import { SettingsView } from '@/components/domain/SettingsView';
 import { CommandPaletteModal, type CommandPaletteCommand } from '@/components/molecules/CommandPaletteModal';
+import { ModalOverlay } from '@/components/primitives/ModalOverlay';
+import { TextInput } from '@/components/primitives/TextInput';
+import { ActionButton } from '@/components/primitives/ActionButton';
 import { useVFS } from '@/hooks/useVFS';
 import { useYjsCollaboration, resetLocalIdentity } from '@/hooks/useYjsCollaboration';
 import { useResponsiveLayout } from '@/hooks/useResponsiveLayout';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
 import type { KeyboardBarCommand } from '@/components/layout/MobileKeyboardBar';
-import { getDB } from '@/db/schema';
+import { getDB, isIndexedDBAvailable } from '@/db/schema';
 import {
   encodeWorkspaceSnapshot,
   parseWorkspaceSnapshot,
@@ -31,8 +34,8 @@ import {
   type MonacoEditorConfig,
   type SearchMatch,
 } from '@/types/editor';
-import { getFileName, getParentPath } from '@/utils/pathUtils';
-import { isIndexedDBAvailable } from '@/db/schema';
+import { getParentPath, validateNodeName } from '@/utils/pathUtils';
+
 
 const WORKSPACE_ID = 'default-workspace';
 const DEFAULT_ROOM_ID = 'collab-workspace-lan';
@@ -267,25 +270,109 @@ const logOutput = useCallback((line: string) => {
     };
   }, [vfs.nodes.length]);
 
+  // ── confirmation dialogs ───────────────────────────────────────────────────
+  /*
+   * Non-blocking dialogs.
+   *
+   * `window.prompt`/`confirm` halt the JavaScript thread until dismissed, which
+   * stalls the render loop, the awareness heartbeat and the WebRTC keep-alive
+   * timers — long enough for peers to drop the connection. These route through
+   * ModalOverlay instead, keeping the event loop free.
+   */
+  type PendingDialog =
+    | { kind: 'create-file'; parent: VirtualDirectory | null; title: string; initialName: string }
+    | { kind: 'create-directory'; parent: VirtualDirectory | null; title: string; initialName: string }
+    | { kind: 'delete'; node: VFSNode };
+
+  const [dialog, setDialog] = useState<PendingDialog | null>(null);
+  const [dialogName, setDialogName] = useState('');
+  const dialogInputRef = useRef<HTMLInputElement | null>(null);
+
+  const openDialog = useCallback((next: PendingDialog, initialName = '') => {
+    setDialog(next);
+    setDialogName(next.kind === 'delete' ? '' : initialName);
+  }, []);
+
+  const closeDialog = useCallback(() => {
+    setDialog(null);
+    setDialogName('');
+  }, []);
+
+  const submitDialog = useCallback(() => {
+    if (!dialog) return;
+
+    if (dialog.kind === 'delete') {
+      const node = dialog.node;
+      closeDialog();
+      void vfs.deleteNode(node.id).then((result) => {
+        if (!result.ok && result.error) logOutput(`delete failed: ${result.error}`);
+      });
+      return;
+    }
+
+    const parent = dialog.parent;
+    const name = dialogName.trim();
+    closeDialog();
+    if (!name) return;
+
+    const mutation =
+      dialog.kind === 'create-file'
+        ? vfs.createFile(parent?.id ?? null, name)
+        : vfs.createDirectory(parent?.id ?? null, name);
+
+    void mutation.then((result) => {
+      if (result.ok) return;
+      logOutput(
+        `${dialog.kind === 'create-file' ? 'create file' : 'create folder'} failed: ${result.error}`,
+      );
+    });
+  }, [closeDialog, dialog, dialogName, logOutput, vfs]);
+
+  const dialogNameValidation = useMemo(
+    () => validateNodeName(dialogName),
+    [dialogName],
+  );
+
+  const dialogCanSubmit =
+    dialog !== null &&
+    (dialog.kind === 'delete' ? true : dialogName.trim().length > 0 && dialogNameValidation.valid);
+
   // ── workspace mutations ────────────────────────────────────────────────────
   const handleCreateFile = useCallback(
-    async (parent: VirtualDirectory | null, name?: string) => {
-      const resolved = name ?? window.prompt('New file name', 'untitled.ts');
-      if (!resolved) return;
-      const result = await vfs.createFile(parent?.id ?? null, resolved);
-      if (!result.ok && result.error) logOutput(`create file failed: ${result.error}`);
+    (parent: VirtualDirectory | null, name?: string) => {
+      if (name !== undefined) {
+        void vfs.createFile(parent?.id ?? null, name).then((result) => {
+          if (!result.ok && result.error) logOutput(`create file failed: ${result.error}`);
+        });
+        return;
+      }
+      openDialog(
+        { kind: 'create-file', parent, title: parent ? `New file in ${parent.path}` : 'New file', initialName: 'untitled.ts' },
+        'untitled.ts',
+      );
     },
-    [logOutput, vfs],
+    [logOutput, openDialog, vfs],
   );
 
   const handleCreateDirectory = useCallback(
-    async (parent: VirtualDirectory | null, name?: string) => {
-      const resolved = name ?? window.prompt('New folder name', 'new-folder');
-      if (!resolved) return;
-      const result = await vfs.createDirectory(parent?.id ?? null, resolved);
-      if (!result.ok && result.error) logOutput(`create folder failed: ${result.error}`);
+    (parent: VirtualDirectory | null, name?: string) => {
+      if (name !== undefined) {
+        void vfs.createDirectory(parent?.id ?? null, name).then((result) => {
+          if (!result.ok && result.error) logOutput(`create folder failed: ${result.error}`);
+        });
+        return;
+      }
+      openDialog(
+        {
+          kind: 'create-directory',
+          parent,
+          title: parent ? `New folder in ${parent.path}` : 'New folder',
+          initialName: 'new-folder',
+        },
+        'new-folder',
+      );
     },
-    [logOutput, vfs],
+    [logOutput, openDialog, vfs],
   );
 
   const handleRename = useCallback(
@@ -297,12 +384,10 @@ const logOutput = useCallback((line: string) => {
   );
 
   const handleDelete = useCallback(
-    async (node: VFSNode) => {
-      if (!window.confirm(`Delete ${node.path}? Peers keep their own copy until they reload.`)) return;
-      const result = await vfs.deleteNode(node.id);
-      if (!result.ok && result.error) logOutput(`delete failed: ${result.error}`);
+    (node: VFSNode) => {
+      openDialog({ kind: 'delete', node });
     },
-    [logOutput, vfs],
+    [openDialog],
   );
 
   const handleOpenMatch = useCallback(
@@ -401,6 +486,41 @@ const logOutput = useCallback((line: string) => {
     editorRef.current = editor;
     setEditorReady(Boolean(editor));
   }, []);
+
+  /*
+   * Whether the user is typing into the editor.
+   *
+   * `visualViewport` alone is not enough on its own: the accessory tray is
+   * useful exactly when the caret is in the code, and a focus signal works on
+   * every platform (including test environments, where no software keyboard
+   * ever opens). Combined with `keyboardOpen` it also keeps the tray and the
+   * mobile navigation mutually exclusive.
+   */
+  const [editorFocused, setEditorFocused] = useState(false);
+
+  useEffect(() => {
+    const isEditorTarget = (target: EventTarget | null): boolean =>
+      target instanceof HTMLElement && Boolean(target.closest('[data-testid="editor-surface"]'));
+
+    const handleFocusIn = (event: FocusEvent): void => {
+      if (isEditorTarget(event.target)) setEditorFocused(true);
+    };
+
+    const handleFocusOut = (event: FocusEvent): void => {
+      if (isEditorTarget(event.relatedTarget)) return;
+      setEditorFocused(false);
+    };
+
+    document.addEventListener('focusin', handleFocusIn);
+    document.addEventListener('focusout', handleFocusOut);
+    return () => {
+      document.removeEventListener('focusin', handleFocusIn);
+      document.removeEventListener('focusout', handleFocusOut);
+    };
+  }, []);
+
+  const keyboardBarVisible =
+    viewport.keyboardOpen || (viewport.isMobile && viewport.isTouch && editorFocused);
 
   const handleKeyboardInsert = useCallback((text: string) => {
     editorRef.current?.trigger('mobile-keyboard-bar', 'type', { text });
@@ -753,7 +873,7 @@ const logOutput = useCallback((line: string) => {
         isMobile={viewport.isMobile}
         isTablet={viewport.isTablet}
         viewportHeight={viewport.height}
-        keyboardBarVisible={viewport.isMobile || viewport.keyboardOpen}
+        keyboardBarVisible={keyboardBarVisible}
         onKeyboardInsert={handleKeyboardInsert}
         onKeyboardCommand={handleKeyboardCommand}
         keyboardBarDisabled={!editorReady}
@@ -768,11 +888,65 @@ const logOutput = useCallback((line: string) => {
         onOpenFile={(fileId) => void vfs.openFile(fileId)}
         onRunCommand={runCommand}
       />
+
+      <ModalOverlay
+        testId="workspace-dialog"
+        open={dialog !== null}
+        onClose={closeDialog}
+        size="sm"
+        title={
+          dialog?.kind === 'delete'
+            ? 'Delete this item?'
+            : dialog?.kind === 'create-directory'
+              ? 'Create a folder'
+              : 'Create a file'
+        }
+        description={
+          dialog?.kind === 'delete'
+            ? `${dialog.node.path} and everything inside it will be removed from this workspace. Peers keep their own copy until they reload.`
+            : dialog?.kind === 'create-directory'
+              ? 'Folders group files in the explorer tree.'
+              : 'The file is created empty and opens in the editor.'
+        }
+        initialFocusRef={dialog?.kind === 'delete' ? undefined : dialogInputRef}
+        footer={
+          <div className="flex justify-end gap-2">
+            <ActionButton testId="workspace-dialog-cancel" variant="secondary" onClick={closeDialog}>
+              Cancel
+            </ActionButton>
+            <ActionButton
+              testId="workspace-dialog-confirm"
+              variant={dialog?.kind === 'delete' ? 'danger' : 'primary'}
+              disabled={!dialogCanSubmit}
+              onClick={submitDialog}
+            >
+              {dialog?.kind === 'delete' ? 'Delete' : 'Create'}
+            </ActionButton>
+          </div>
+        }
+      >
+        {dialog?.kind === 'delete' ? (
+          <p className="text-xs text-vscode-fg">
+            This cannot be undone from the sidebar. Export the workspace first if you want a copy.
+          </p>
+        ) : (
+          <TextInput
+            testId="workspace-dialog-name"
+            inputRef={dialogInputRef}
+            label="Name"
+            value={dialogName}
+            onChange={setDialogName}
+            onEnter={submitDialog}
+            onEscape={closeDialog}
+            tone={dialogName.trim().length > 0 && !dialogNameValidation.valid ? 'error' : 'default'}
+            errorMessage={
+              dialogName.trim().length > 0 && !dialogNameValidation.valid
+                ? dialogNameValidation.reason
+                : null
+            }
+          />
+        )}
+      </ModalOverlay>
     </>
   );
-}
-
-/** Re-exported for the quick-open label of a single file. */
-export function paletteLabel(fileName: string): string {
-  return getFileName(fileName);
 }

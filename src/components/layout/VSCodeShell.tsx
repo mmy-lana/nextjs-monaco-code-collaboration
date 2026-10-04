@@ -209,7 +209,16 @@ export function VSCodeShell(props: VSCodeShellProps) {
         disabled={keyboardBarDisabled}
       />
 
-      {isMobile ? (
+      {/*
+       * Mobile chrome collision.
+
+       * The accessory bar and the bottom navigation both occupy the space the
+       * software keyboard has just freed up. On a 360–430px screen rendering
+       * both squeezes the editor below a usable height and buries the code
+       * behind chrome, so while the keyboard is open the navigation yields and
+       * the tray that the thumb is actually typing into keeps its space.
+       */}
+      {isMobile && !keyboardBarVisible ? (
         <ActivityBar
           activeTab={activityTab}
           onSelect={onActivityTabChange}
