@@ -161,9 +161,82 @@ export default function WorkspacePage() {
       .map((node) => node.name);
   }, [activeFile, vfs.nodes]);
 
-  const logOutput = useCallback((line: string) => {
+const logOutput = useCallback((line: string) => {
     setOutput((current) => [...current.slice(-200), line]);
   }, []);
+
+  /*
+   * Body of the active file.
+   *
+   * Monaco builds its model synchronously when a tab is activated, but the body
+   * lives in IndexedDB and arrives asynchronously, so `value` is cleared during
+   * the render that switches files and repopulated once the read resolves. That
+   * guarantees the editor never renders the previously active file's text, and
+   * the wrapper hydrates the empty model when the read lands.
+   */
+  const [activeContent, setActiveContent] = useState('');
+  const [contentForFileId, setContentForFileId] = useState<string | null>(null);
+
+  if (contentForFileId !== activeFileId) {
+    setContentForFileId(activeFileId);
+    setActiveContent('');
+  }
+
+  useEffect(() => {
+    if (!activeFileId) return undefined;
+
+    let cancelled = false;
+    void vfs
+      .loadFileContent(activeFileId)
+      .then((text) => {
+        if (cancelled) return;
+        setActiveContent((current) => (current === text ? current : text));
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        logOutput(
+          `could not read ${activeFileId}: ${error instanceof Error ? error.message : 'unknown error'}`,
+        );
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeFileId, vfs.loadFileContent, logOutput]);
+
+    const handleCursorChange = useCallback(
+    (position: { line: number; column: number }, selectionLength: number) => {
+      // Cursor events arrive continuously; bail out when nothing moved so the
+      // shell does not re-render on every keystroke.
+      setCursor((previous) =>
+        previous &&
+        previous.line === position.line &&
+        previous.column === position.column &&
+        previous.selectionLength === selectionLength
+          ? previous
+          : { line: position.line, column: position.column, selectionLength },
+      );
+    },
+    [],
+  );
+
+  const handleDiagnosticsChange = useCallback((items: DiagnosticItem[]) => {
+    setDiagnostics(items);
+  }, []);
+
+  const handleContentChange = useCallback(
+    (next: string) => {
+      setActiveContent(next);
+      if (!activeFileId) return;
+
+      void vfs.saveFileContent(activeFileId, next).then((result) => {
+        if (!result.ok && result.error) {
+          logOutput(`storage rejected an edit to ${activeFileId}: ${result.error}`);
+        }
+      });
+    },
+    [activeFileId, logOutput, vfs.saveFileContent],
+  );
 
   useEffect(() => {
     if (!collab.identity) return;
@@ -619,17 +692,13 @@ export default function WorkspacePage() {
             fileId={activeFileId}
             filePath={activeFile?.path ?? ''}
             language={activeFile?.language ?? 'plaintext'}
-            value={activeFile ? '' : ''}
+            value={activeContent}
             provider={collab.provider}
             config={config}
             onEditorReady={handleEditorReady}
-            onDiagnosticsChange={setDiagnostics}
-            onCursorChange={(position, selectionLength) =>
-              setCursor({ line: position.line, column: position.column, selectionLength })
-            }
-            onContentChange={(next) => {
-              if (activeFileId) void vfs.saveFileContent(activeFileId, next);
-            }}
+            onDiagnosticsChange={handleDiagnosticsChange}
+            onCursorChange={handleCursorChange}
+            onContentChange={handleContentChange}
           />
         }
         panelOpen={panelOpen}

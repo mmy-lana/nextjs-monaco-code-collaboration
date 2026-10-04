@@ -50,6 +50,7 @@ function Phase4App() {
   const vfs = useVFS(WORKSPACE_ID);
   const viewport = useResponsiveLayout();
   const editorRef = useRef<MonacoEditorNamespace.IStandaloneCodeEditor | null>(null);
+  const shortcutLogRef = useRef<HTMLSpanElement | null>(null);
 
   const [content, setContent] = useState('');
   const [cursor, setCursor] = useState({ line: 1, column: 1, selectionLength: 0 });
@@ -86,7 +87,12 @@ function Phase4App() {
         description: 'Probe shortcut',
         display: '⌘F9',
         allowInEditor: true,
-        handler: () => shortcutHits.push('probe'),
+        handler: () => {
+          shortcutHits.push('probe');
+          // Written straight to the DOM: the cursor reporter is now correctly
+          // suppressed when nothing moved, so no other render would flush this.
+          if (shortcutLogRef.current) shortcutLogRef.current.textContent = shortcutHits.join(',');
+        },
       },
       {
         id: 'phase4.palette',
@@ -94,7 +100,10 @@ function Phase4App() {
         mod: true,
         description: 'Open quick open',
         display: '⌘P',
-        handler: () => shortcutHits.push('palette'),
+        handler: () => {
+          shortcutHits.push('palette');
+          if (shortcutLogRef.current) shortcutLogRef.current.textContent = shortcutHits.join(',');
+        },
       },
     ],
     [],
@@ -394,7 +403,11 @@ function Phase4App() {
         </div>
         <div>
           <dt className="text-vscode-description-fg">Shortcut hits</dt>
-          <dd data-testid="shortcut-hits" className="text-vscode-fg">
+          <dd
+            data-testid="shortcut-hits"
+            className="text-vscode-fg"
+            ref={shortcutLogRef}
+          >
             {shortcutHits.join(',')}
           </dd>
         </div>

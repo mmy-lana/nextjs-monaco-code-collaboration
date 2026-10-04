@@ -81,6 +81,30 @@ async function runSuite({ page, url, suite }) {
   suite.equal('the splitter sets touch-action: none', desktop.splitterTouchAction, 'none');
   suite.ok('Monaco renders its content surface', desktop.monacoReady);
 
+  // ── REACT-01 / DATA-01 regressions ──────────────────────────────────────────
+  // The cursor reporter used to feed host state through an inline callback,
+  // which re-ran its own subscription effect every render and crashed the tab
+  // with "Maximum update depth exceeded". Any error at all fails the browser
+  // health check; this assertion names the regression explicitly.
+  const editorText = await page.evaluate(() => {
+    const lines = document.querySelector('.monaco-editor .view-lines');
+    return {
+      text: (lines?.textContent ?? '').replace(/\s+/g, ' ').trim(),
+      renderedLines: lines?.children.length ?? 0,
+    };
+  });
+  suite.atLeast('the active file renders its persisted body', editorText.renderedLines, 3);
+  suite.ok(
+    'the editor shows the seeded starter content, not an empty buffer',
+    editorText.text.includes('Starter file'),
+    editorText.text.slice(0, 120),
+  );
+  suite.ok(
+    'the editor body is not the empty string',
+    editorText.text.length > 40,
+    `length=${editorText.text.length}`,
+  );
+
   // ── status bar contents ─────────────────────────────────────────────────────
   suite.equal(
     'status bar reports the seeded file language',
@@ -126,6 +150,41 @@ async function runSuite({ page, url, suite }) {
       { timeout: 15000 },
     );
     suite.ok('opening a Markdown file switches the editor language', true);
+
+    // Switching tabs must load that file's own body, not the previous buffer.
+    const readmeText = await page
+      .waitForFunction(
+        () => {
+          const lines = document.querySelector('.monaco-editor .view-lines');
+          const text = (lines?.textContent ?? '').replace(/\s+/g, ' ').trim();
+          return text.includes('LAN Code Collaboration') ? text : null;
+        },
+        { timeout: 15000 },
+      )
+      .then((handle) => handle.jsonValue())
+      .catch(() => null);
+    suite.ok(
+      'switching tabs loads the newly active file body',
+      typeof readmeText === 'string' && readmeText.length > 20,
+      String(readmeText).slice(0, 120),
+    );
+
+    await page.waitForFunction(
+      () => {
+        const lines = document.querySelector('.monaco-editor .view-lines');
+        const text = (lines?.textContent ?? '').replace(/\s+/g, ' ');
+        return !text.includes('Starter file');
+      },
+      { timeout: 15000 },
+    ).catch(() => undefined);
+    const afterSwitch = await page.evaluate(() =>
+      (document.querySelector('.monaco-editor .view-lines')?.textContent ?? '').replace(/\s+/g, ' '),
+    );
+    suite.ok(
+      'the previous file body is not left in the editor after switching',
+      !afterSwitch.includes('Starter file'),
+      afterSwitch.slice(0, 120),
+    );
   }
 
   const tabCountBefore = await page.$$eval('[data-testid^="editor-tab-"][role="tab"]', (nodes) => nodes.length);

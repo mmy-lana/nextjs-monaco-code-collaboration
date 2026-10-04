@@ -48,7 +48,12 @@ export interface MonacoWrapperProps {
   fileId: string | null;
   filePath: string;
   language: string;
-  /** Seed text used only when both the model and the CRDT are empty. */
+  /**
+   * Persisted body of the file, resolved asynchronously from IndexedDB.
+   *
+   * It is used to hydrate an empty model and to seed a fresh CRDT; it is never
+   * written back over a model that already has content.
+   */
   value: string;
   provider: WebrtcProvider | null;
   config?: MonacoEditorConfig;
@@ -91,13 +96,35 @@ export function MonacoWrapper({
   const [editor, setEditor] = useState<MonacoEditorNamespace.IStandaloneCodeEditor | null>(null);
   const [monaco, setMonaco] = useState<typeof import('monaco-editor') | null>(null);
   const cursorDisposableRef = useRef<IDisposable | null>(null);
+
+  /*
+   * Host callbacks are held in mutable refs rather than used as effect
+   * dependencies. Inline arrow props change identity on every host render, so
+   * depending on them would re-run the subscription effects each render; the
+   * effects call back into host state, which re-renders the host, which
+   * produces new callbacks, which re-runs the effects — an unbounded update
+   * loop ("Maximum update depth exceeded"). The refs break that cycle while
+   * still invoking the latest callback.
+   */
   const onEditorReadyRef = useRef(onEditorReady);
   onEditorReadyRef.current = onEditorReady;
   const onDiagnosticsRef = useRef(onDiagnosticsChange);
   onDiagnosticsRef.current = onDiagnosticsChange;
+  const onCursorChangeRef = useRef(onCursorChange);
+  onCursorChangeRef.current = onCursorChange;
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const onContentChangeRef = useRef(onContentChange);
   onContentChangeRef.current = onContentChange;
+
+  /** Last position already reported upstream, used to suppress no-op updates. */
+  const reportedCursorRef = useRef<{
+    line: number;
+    column: number;
+    selectionLength: number;
+  } | null>(null);
+
+  /** Serialised marker signature used to suppress identical diagnostic pushes. */
+  const reportedMarkersRef = useRef<string>('');
 
   const options = useMemo(
     () => buildMonacoOptions(config),
@@ -156,22 +183,29 @@ export function MonacoWrapper({
       const severityOf = (severity: number): DiagnosticItem['severity'] =>
         severity === 8 ? 'warning' : severity === 4 ? 'info' : 'error';
 
-      onDiagnosticsRef.current?.(
-        markers.map((marker, index) => ({
-          id: `${marker.startLineNumber}-${marker.startColumn}-${index}`,
-          fileId: fileId ?? 'active',
-          filePath,
-          message: marker.message,
-          severity: severityOf(marker.severity),
-          startLine: marker.startLineNumber,
-          startColumn: marker.startColumn,
-          endLine: marker.endLineNumber,
-          endColumn: marker.endColumn,
-          source: marker.source ?? 'monaco',
-        })),
-      );
+      const next = markers.map((marker, index) => ({
+        id: `${marker.startLineNumber}-${marker.startColumn}-${index}`,
+        fileId: fileId ?? 'active',
+        filePath,
+        message: marker.message,
+        severity: severityOf(marker.severity),
+        startLine: marker.startLineNumber,
+        startColumn: marker.startColumn,
+        endLine: marker.endLineNumber,
+        endColumn: marker.endColumn,
+        source: marker.source ?? 'monaco',
+      }));
+
+      // Monaco republishes markers frequently; only forward real changes so the
+      // Problems panel does not re-render on every keystroke.
+      const signature = JSON.stringify(next);
+      if (signature === reportedMarkersRef.current) return;
+      reportedMarkersRef.current = signature;
+
+      onDiagnosticsRef.current?.(next);
     };
 
+    reportedMarkersRef.current = '';
     collect();
     const disposable = monaco.editor.onDidChangeMarkers(collect);
     return () => disposable.dispose();
@@ -187,7 +221,37 @@ export function MonacoWrapper({
   // ── CRDT binding ────────────────────────────────────────────────────────────
   useMonacoBinding({ editor, doc, fileId, provider, initialContent: value, onLocalChange: handleLocalChange });
 
+  /*
+   * Late content hydration.
+   *
+   * The Monaco model for a path is created synchronously when the tab is
+   * activated, but the body comes from IndexedDB through an async read, so the
+   * model usually exists while `value` is still empty. Filling the model here —
+   * rather than passing a controlled `value` prop — means the buffer is never
+   * rendered from a stale file, and the binding above pushes the text into the
+   * CRDT through the normal Monaco -> Yjs path.
+   *
+   * The guard is deliberately one-sided: only an empty model is ever filled, so
+   * local edits and remote updates are never overwritten.
+   */
+  useEffect(() => {
+    if (!editor || value.length === 0) return;
+
+    const model = editor.getModel();
+    if (!model || model.getValue().length > 0) return;
+
+    editor.executeEdits('persisted-content', [
+      {
+        range: model.getFullModelRange(),
+        text: value,
+        forceMoveMarkers: true,
+      },
+    ]);
+  }, [editor, value]);
+
   // ── status bar reporting ───────────────────────────────────────────────────
+  // Memoised on the editor alone: the host callback is read through a ref, so
+  // this identity never changes and the subscription effect below runs once.
   const reportCursor = useCallback(() => {
     if (!editor) return;
     const position = editor.getPosition();
@@ -205,11 +269,32 @@ export function MonacoWrapper({
       });
     }
 
-    onCursorChange?.({ line: position.lineNumber, column: position.column }, selectionLength);
-  }, [editor, onCursorChange]);
+    const previous = reportedCursorRef.current;
+    if (
+      previous &&
+      previous.line === position.lineNumber &&
+      previous.column === position.column &&
+      previous.selectionLength === selectionLength
+    ) {
+      return;
+    }
+
+    reportedCursorRef.current = {
+      line: position.lineNumber,
+      column: position.column,
+      selectionLength,
+    };
+    onCursorChangeRef.current?.(
+      { line: position.lineNumber, column: position.column },
+      selectionLength,
+    );
+  }, [editor]);
 
   useEffect(() => {
     if (!editor) return undefined;
+
+    // A different document starts from an unknown position.
+    reportedCursorRef.current = null;
 
     cursorDisposableRef.current?.dispose();
     cursorDisposableRef.current = editor.onDidChangeCursorSelection(reportCursor);
@@ -219,7 +304,7 @@ export function MonacoWrapper({
       cursorDisposableRef.current?.dispose();
       cursorDisposableRef.current = null;
     };
-  }, [editor, reportCursor]);
+  }, [editor, fileId, reportCursor]);
 
   if (!fileId) {
     return (

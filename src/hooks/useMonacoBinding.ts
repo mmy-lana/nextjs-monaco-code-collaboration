@@ -158,11 +158,24 @@ export function useMonacoBinding({
     const yText = getFileText(doc, fileId);
     const disposables: IDisposable[] = [];
 
-    // ── initial hydration (once per binding) ──────────────────────────────────
-    if (yText.length === 0 && model.getValue().length === 0 && initialContent.length > 0) {
+    /*
+     * Reconcile the model and the CRDT exactly once per binding.
+     *
+     * Three cases, in priority order:
+     *  1. CRDT empty, model has text  -> adopt the model into the CRDT. Wiping
+     *     the model here would destroy the file whenever the room is joined
+     *     before the persisted body reaches the editor.
+     *  2. CRDT empty, model empty, seed text available -> seed from it.
+     *  3. Both populated but different -> the CRDT is the shared source of
+     *     truth, so replay it into the model.
+     */
+    const modelText = model.getValue();
+
+    if (yText.length === 0 && modelText.length > 0) {
+      doc.transact(() => yText.insert(0, modelText), MONACO_ORIGIN);
+    } else if (yText.length === 0 && initialContent.length > 0) {
       doc.transact(() => yText.insert(0, initialContent), MONACO_ORIGIN);
-    }
-    if (model.getValue() !== yText.toString()) {
+    } else if (modelText !== yText.toString()) {
       isApplyingRemoteRef.current = true;
       try {
         editor.executeEdits(REMOTE_ORIGIN, [

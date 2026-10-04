@@ -48,8 +48,11 @@ export interface UseVFSResult {
   openFile: (fileId: string) => Promise<void>;
   closeFile: (fileId: string) => Promise<void>;
   toggleDirectory: (directoryId: string) => void;
-  /** Persists a file body (used after CRDT updates, debounced by the caller). */
-  saveFileContent: (fileId: string, plainText: string) => Promise<void>;
+  /**
+   * Persists a file body. Returns a failure result instead of throwing so the
+   * caller can surface storage-limit errors to the user.
+   */
+  saveFileContent: (fileId: string, plainText: string) => Promise<VFSMutationResult>;
   loadFileContent: (fileId: string) => Promise<string>;
   reconcileTabs: () => Promise<void>;
   refresh: () => Promise<void>;
@@ -535,19 +538,46 @@ export function useVFS(workspaceId: string): UseVFSResult {
         );
         const doomed = descendants.map((candidate) => candidate.id);
 
-        // Soft-delete first so every open editor can tear its Yjs binding down,
-        // then wipe the rows once nothing references them.
+        /*
+         * Teardown ordering matters. Tombstoning first stops the tree, the tab
+         * strip and the search index from resolving the node; closing the tabs
+         * that referenced it then unmounts their Monaco models and CRDT
+         * bindings; only once nothing can still write is the row physically
+         * removed. Purging earlier leaves live bindings writing to rows that no
+         * longer exist.
+         */
         await db.transaction('rw', db.nodes, async () => {
           for (const id of doomed) {
             await db.nodes.update(id, { deletedAt: now, updatedAt: now });
           }
         });
 
+        const currentWorkspace = await db.workspaces.get(workspaceId);
+        if (currentWorkspace) {
+          /*
+           * Reconciliation needs the full node set: the doomed rows are marked
+           * tombstoned in place, so every other node is passed through live.
+           * Passing only the doomed rows would look like an empty workspace and
+           * close every open tab.
+           */
+          const doomedSet = new Set(doomed);
+          await reconcileWorkspaceTabs(
+            currentWorkspace,
+            nodes.map((entry) =>
+              doomedSet.has(entry.id) ? { ...entry, deletedAt: now } : entry,
+            ),
+          );
+        }
+
+        // Give the React commit that unmounts the editor models a chance to run
+        // before their rows disappear.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
         await db.nodes.bulkDelete(doomed);
         return node;
       });
     },
-    [commitStructure, nodes],
+    [commitStructure, nodes, workspaceId],
   );
 
   const openFile = useCallback(
@@ -610,22 +640,43 @@ export function useVFS(workspaceId: string): UseVFSResult {
   }, []);
 
   const saveFileContent = useCallback(
-    async (fileId: string, plainText: string): Promise<void> => {
-      if (plainText.length > MAX_FILE_CHARACTERS) return;
+    async (fileId: string, plainText: string): Promise<VFSMutationResult> => {
+      /*
+       * Oversized documents are rejected loudly. Returning silently here would
+       * let the in-memory buffer and the persisted snapshot diverge without any
+       * signal that edits were being dropped.
+       */
+      const assessment = assessFileSize(plainText);
+      if (!assessment.accepted) {
+        const reason =
+          assessment.reason ??
+          `Document exceeds the ${MAX_FILE_CHARACTERS.toLocaleString()} character limit.`;
+        return failure(reason);
+      }
 
       const db = getDB();
       const node = await db.nodes.get(fileId);
-      if (!node || !isVirtualFile(node)) return;
+      if (!node) return failure('That file no longer exists');
+      if (!isVirtualFile(node)) return failure('Only files can hold content');
 
       const now = Date.now();
-      await db.transaction('rw', db.contents, db.nodes, async () => {
-        await db.contents.update(node.contentId, {
-          plainText,
-          size: plainText.length,
-          updatedAt: now,
+
+      try {
+        await db.transaction('rw', db.contents, db.nodes, async () => {
+          await db.contents.update(node.contentId, {
+            plainText,
+            size: plainText.length,
+            updatedAt: now,
+          });
+          await db.nodes.update(fileId, { size: plainText.length, updatedAt: now });
         });
-        await db.nodes.update(fileId, { size: plainText.length, updatedAt: now });
-      });
+      } catch (writeError) {
+        return failure(
+          writeError instanceof Error ? writeError.message : String(writeError),
+        );
+      }
+
+      return { ok: true, error: null, node };
     },
     [],
   );
